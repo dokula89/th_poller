@@ -1,0 +1,57 @@
+{
+  "profile_name": "Wix",
+  "detection": {
+    "domain_patterns": ["wixsite.com", "wix.com"],
+    "html_markers": [
+      "wixui-repeater",
+      "fluid-columns-repeater",
+      "wixui-rich-text"
+    ]
+  },
+  "extraction": {
+    "container_selector": "fluid-columns-repeater, div[role='list']",
+    "listing_selector": "div[role='listitem'], div.wixui-repeater__item",
+    "fields": {
+      "title": {
+        "selector": "h2",
+        "attribute": "text"
+      },
+      "link": {
+        "selector": "a[data-testid='linkElement']",
+        "attribute": "href"
+      },
+      "bedrooms": {
+        "selector": "div:contains('Bed') + div, p:contains('BR')",
+        "attribute": "text",
+        "pattern": "(\\d+)\\s*(?:BR|Bed|Bedroom)"
+      },
+      "bathrooms": {
+        "selector": "div:contains('Bath') + div",
+        "attribute": "text",
+        "pattern": "(\\d+(?:\\.\\d+)?)\\s*(?:BA|Bath|Bathroom)"
+      },
+      "price": {
+        "selector": "span:contains('$'), div:contains('$')",
+        "attribute": "text",
+        "pattern": "\\$([\\d,]+)"
+      },
+      "neighborhood": {
+        "selector": "h2[style*='15px'], span.color_43",
+        "attribute": "text"
+      },
+      "description": {
+        "selector": "p.wixui-rich-text__text",
+        "attribute": "text"
+      },
+      "image": {
+        "selector": "wow-image img, img[data-bbox]",
+        "attribute": "src"
+      },
+      "availability": {
+        "selector": "p:contains('Available'), span:contains('Available')",
+        "attribute": "text"
+      }
+    }
+  },
+  "openai_prompt_template": "Extract all apartment listings from this Wix-based property website.\n\nEach listing is in a repeater item with role='listitem' or class containing 'wixui-repeater__item'.\n\nIMPORTANT:\n- DO NOT extract navigation elements or buttons\n- DO NOT extract contact forms or modal dialogs\n- ONLY extract actual property listings with property names and details\n- Each listing should have at least: title/address and bedroom info\n\nHTML Content:\n{html}\n\nReturn a JSON array of listing objects with these fields (use null if not found):\n- listing_website\n- title\n- bedrooms\n- bathrooms\n- sqft\n- price\n- img_urls (array)\n- full_address\n- street\n- city\n- state\n- neighborhood\n- description\n- available_date\n- phone_contact\n- email_contact\n- apply_now_link\n\nReturn ONLY the JSON array, no other text."
+}

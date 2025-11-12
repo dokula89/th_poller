@@ -1,0 +1,32 @@
+{
+    "status": "done",
+    "percent": 100,
+    "message": "Completed",
+    "log": [
+        "[10:16:17] [PHP] Validating inputs",
+        "[10:16:17] [PHP] Parsing locally",
+        "[10:16:18] [PHP] Parsed 2 listings",
+        "[10:16:18] [PHP] Uploading JSON via SFTP",
+        "[10:16:23] [PHP] Uploading source HTML via SFTP",
+        "[10:16:28] [PHP] Completed"
+    ],
+    "result": {
+        "savePath": "C:\\Users\\dokul\\Desktop\\robot\\th_poller\\Captures\\2025-11-11\\Websites\\google_places_1949.json",
+        "sftp": {
+            "success": true,
+            "status": 226,
+            "body": ""
+        },
+        "http": null,
+        "htmlSftp": {
+            "success": true,
+            "status": 226,
+            "body": ""
+        },
+        "listingsCount": 2,
+        "method": "local",
+        "model": "gpt-4o-mini"
+    },
+    "started_at": 1762852577,
+    "updated": 1762852588
+}

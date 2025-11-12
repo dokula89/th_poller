@@ -1,0 +1,13 @@
+{
+  "profile_name": "Default",
+  "detection": {
+    "domain_patterns": [],
+    "html_markers": []
+  },
+  "extraction": {
+    "container_selector": "body",
+    "listing_selector": "div, article",
+    "fields": {}
+  },
+  "openai_prompt_template": "Extract all apartment listings from this HTML page.\n\nIMPORTANT:\n- DO NOT extract filter options, dropdowns, or form elements\n- DO NOT extract navigation menus or pagination\n- ONLY extract actual property listings with addresses and rental information\n- Each listing should have at least: address/title, price, and bedrooms\n\nHTML Content:\n{html}\n\nReturn a JSON array of listing objects with these fields (use null if not found):\n- listing_website\n- title\n- bedrooms\n- bathrooms\n- sqft\n- price\n- img_urls (array)\n- full_address\n- street\n- city\n- state\n- description\n- available_date\n- phone_contact\n- email_contact\n- apply_now_link\n\nReturn ONLY the JSON array, no other text."
+}

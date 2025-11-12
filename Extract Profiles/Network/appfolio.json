@@ -1,0 +1,65 @@
+{
+  "profile_name": "AppFolio",
+  "detection": {
+    "domain_patterns": ["appfolio.com", "images.cdn.appfolio.com"],
+    "html_markers": [
+      "js-listings-container",
+      "js-listing-item",
+      "listing-item result",
+      "all-listings",
+      "listing-section",
+      "slider-images"
+    ]
+  },
+  "extraction": {
+    "container_selector": "div[id='result_container'], div.js-listings-container",
+    "listing_selector": "div.listing-item, div.js-listing-item, div.listing-item.result",
+    "fields": {
+      "title": {
+        "selector": "h2.js-listing-title a, h2 a",
+        "attribute": "text"
+      },
+      "link": {
+        "selector": "h2.js-listing-title a, h2 a",
+        "attribute": "href"
+      },
+      "bedrooms": {
+        "selector": "span.bedroom, .js-bed-count",
+        "attribute": "text",
+        "pattern": "(\\d+)\\s*(?:BR|Bed|Bedroom)"
+      },
+      "bathrooms": {
+        "selector": "span.bathroom, .js-bath-count",
+        "attribute": "text",
+        "pattern": "(\\d+(?:\\.\\d+)?)\\s*(?:BA|Bath|Bathroom)"
+      },
+      "price": {
+        "selector": "span.rent, .js-listing-price",
+        "attribute": "text",
+        "pattern": "\\$([\\d,]+)"
+      },
+      "sqft": {
+        "selector": "span.sqft, .js-listing-sqft",
+        "attribute": "text",
+        "pattern": "([\\d,]+)\\s*(?:sq\\.?\\s*ft|sqft)"
+      },
+      "address": {
+        "selector": ".listing-address, .js-listing-address",
+        "attribute": "text"
+      },
+      "description": {
+        "selector": ".listing-description, .js-listing-description p",
+        "attribute": "text"
+      },
+      "image": {
+        "selector": "img.listing-image, .js-listing-image img",
+        "attribute": "src"
+      },
+      "available_date": {
+        "selector": ".available-date, .js-available-date",
+        "attribute": "text"
+      }
+    }
+  },
+  "openai_prompt_template": "Extract all apartment listings from this AppFolio property management page.\n\nEach listing is contained in a 'div.listing-item.result' or 'div.js-listing-item'.\n\nIMPORTANT: \n- DO NOT extract filter options (price ranges, bedroom counts in dropdowns)\n- DO NOT extract pagination elements\n- ONLY extract actual property listings with addresses and descriptions\n- Each listing should have at least: title, price, and bedrooms\n\nHTML Content:\n{html}\n\nReturn a JSON array of listing objects with these fields (use null if not found):\n- listing_website\n- title\n- bedrooms\n- bathrooms\n- sqft\n- price\n- img_urls (array)\n- full_address\n- street\n- city\n- state\n- description\n- available_date\n- phone_contact\n- email_contact\n- apply_now_link\n\nReturn ONLY the JSON array, no other text."
+}

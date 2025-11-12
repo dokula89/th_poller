@@ -1,0 +1,32 @@
+{
+    "status": "done",
+    "percent": 100,
+    "message": "Completed",
+    "log": [
+        "[07:56:54] [PHP] Validating inputs",
+        "[07:56:54] [PHP] Parsing locally",
+        "[07:56:54] [PHP] Parsed 0 listings",
+        "[07:56:54] [PHP] Uploading JSON via SFTP",
+        "[07:57:00] [PHP] Uploading source HTML via SFTP",
+        "[07:57:12] [PHP] Completed"
+    ],
+    "result": {
+        "savePath": "C:\\Users\\dokul\\Desktop\\robot\\th_poller\\Captures\\2025-11-08\\networks_6.json",
+        "sftp": {
+            "success": true,
+            "status": 226,
+            "body": ""
+        },
+        "http": null,
+        "htmlSftp": {
+            "success": true,
+            "status": 226,
+            "body": ""
+        },
+        "listingsCount": 0,
+        "method": "local",
+        "model": "gpt-4o-mini"
+    },
+    "started_at": 1762671414,
+    "updated": 1762671432
+}

@@ -1,0 +1,34 @@
+{
+    "status": "done",
+    "percent": 100,
+    "message": "Completed",
+    "log": [
+        "[16:58:14] [PHP] Validating inputs",
+        "[16:58:14] [PHP] Parsing locally",
+        "[16:58:14] [PHP] Parsed 19 listings",
+        "[16:58:14] [PHP] Uploading JSON via SFTP",
+        "[16:58:14] [PHP] Uploading source HTML via SFTP",
+        "[16:58:14] [PHP] Completed"
+    ],
+    "result": {
+        "savePath": "C:\\Users\\dokul\\Desktop\\robot\\th_poller\\Captures\\2025-11-05\\networks_4.json",
+        "sftp": {
+            "success": false,
+            "status": 0,
+            "error": "Failed to connect to 172.104.206.182 port 23655 after 0 ms: Couldn't connect to server",
+            "body": ""
+        },
+        "http": null,
+        "htmlSftp": {
+            "success": false,
+            "status": 0,
+            "error": "Failed to connect to 172.104.206.182 port 23655 after 0 ms: Couldn't connect to server",
+            "body": ""
+        },
+        "listingsCount": 19,
+        "method": "local",
+        "model": "gpt-4o-mini"
+    },
+    "started_at": 1762358294,
+    "updated": 1762358294
+}

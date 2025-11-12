@@ -1,0 +1,5 @@
+c=open('config_hud.py','r',encoding='utf-8').read()
+c=c.replace('\u00ce\u0094','\u0394')
+c=c.replace('\u270f\u00ef\u00b8\u008f','\u270f\ufe0f')
+open('config_hud.py','w',encoding='utf-8').write(c)
+print('Fixed')

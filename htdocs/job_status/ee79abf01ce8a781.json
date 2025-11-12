@@ -1,0 +1,13 @@
+{
+    "status": "error",
+    "percent": 100,
+    "message": "Exception: Access denied for user 'root'@'localhost' (using password: YES)",
+    "log": [
+        "[03:51:59] [PHP] Validating inputs",
+        "[03:51:59] [PHP] Parsing locally",
+        "[03:51:59] [PHP] Exception: Access denied for user 'root'@'localhost' (using password: YES)"
+    ],
+    "result": null,
+    "started_at": 1762224719,
+    "updated": 1762224719
+}

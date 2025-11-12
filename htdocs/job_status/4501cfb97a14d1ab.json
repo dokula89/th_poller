@@ -1,0 +1,14 @@
+{
+    "status": "running",
+    "percent": 30,
+    "message": "About to download 186 listing images",
+    "log": [
+        "[09:30:15] [PHP] Validating inputs",
+        "[09:30:15] [PHP] Parsing locally",
+        "[09:31:48] [PHP] Parsed 186 listings",
+        "[09:31:48] [PHP] About to download images"
+    ],
+    "result": null,
+    "started_at": 1761813015,
+    "updated": 1761813108
+}

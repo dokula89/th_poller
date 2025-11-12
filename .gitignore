@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+debug_queue.log
+
+# Process ID files
+*.pid
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sensitive data
+*.env
+.env
+
+# Captures folder (large HTML/JSON files)
+Captures/
+
+# Database backups (too large)
+*.sql
+offta_backup.sql
+
+# Images folder (can be very large)
+images/
+Images/
+
+# XAMPP/htdocs dashboard files (not needed)
+htdocs/dashboard/
+htdocs/img/
+htdocs/xampp/
+
+# Backup Python files
+*_BACKUP.py
+*_ORIGINAL.py
+*_BEFORE_*.py
+*_WORKING_BACKUP.py
+
+# Temporary files
+*.tmp
+*.bak

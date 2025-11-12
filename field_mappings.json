@@ -1,0 +1,42 @@
+{
+  "network_6": {
+    "1": {
+      "field": "listing_website",
+      "path": "a",
+      "tag": "a",
+      "original_text": "/listings/detail/ba786613-8954-447d-8b6c-c5942b3c218b"
+    },
+    "2": {
+      "field": "img_urls",
+      "path": "img.listing-item__image.is-placeholder",
+      "tag": "img",
+      "original_text": "https://listings.cdn.appfolio.com/listings/assets/listings/rental_listing/place_holder-ea9e892a45f62e048771a4b22081d1eed003a21f0658a92aa5abcfd357dd4699.png"
+    },
+    "4": {
+      "field": "price",
+      "path": "img.listing-item__image.is-placeholder",
+      "tag": "img",
+      "original_text": "$1,650"
+    },
+    "10": {
+      "field": "sqft",
+      "path": "div.listing-item__blurb__right",
+      "tag": "div",
+      "original_text": "626"
+    },
+    "15": {
+      "field": "description",
+      "path": "div.detail-box.hand-hidden",
+      "tag": "div",
+      "original_text": "Spacious 1 Bedroom - Classic Style - Parking"
+    },
+    "16": {
+      "field": "full_address",
+      "path": "dl",
+      "tag": "dl",
+      "original_text": "715 1ST AVE W, #02, Seattle, WA 98119"
+    }
+  },
+  "networks_6": {},
+  "networks_1": {}
+}

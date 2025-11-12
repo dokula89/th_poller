@@ -1,0 +1,34 @@
+{
+    "status": "done",
+    "percent": 100,
+    "message": "Completed",
+    "log": [
+        "[14:14:51] [PHP] Validating inputs",
+        "[14:14:51] [PHP] Parsing locally",
+        "[14:14:51] [PHP] Parsed 196 listings",
+        "[14:14:51] [PHP] Uploading JSON via SFTP",
+        "[14:14:51] [PHP] Uploading source HTML via SFTP",
+        "[14:14:51] [PHP] Completed"
+    ],
+    "result": {
+        "savePath": "C:\\Users\\dokul\\Desktop\\robot\\th_poller\\Captures\\2025-11-07\\listings js-listings-container_1.json",
+        "sftp": {
+            "success": false,
+            "status": 0,
+            "error": "URL rejected: Malformed input to a URL function",
+            "body": ""
+        },
+        "http": null,
+        "htmlSftp": {
+            "success": false,
+            "status": 0,
+            "error": "URL rejected: Malformed input to a URL function",
+            "body": ""
+        },
+        "listingsCount": 196,
+        "method": "local",
+        "model": "gpt-4o-mini"
+    },
+    "started_at": 1762521291,
+    "updated": 1762521291
+}

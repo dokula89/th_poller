@@ -1,0 +1,36 @@
+[DIAG] __main__ entry
+[DIAG] Tkinter imported
+[DIAG] Tk root created
+[DIAG] Tk root withdrawn
+[2025-11-05 01:27:12] config_hud.py main() entry
+[2025-11-05 01:27:12] Tk root created
+[2025-11-05 01:27:13] Exception: name '_refresh_status_counts' is not defined
+Traceback (most recent call last):
+  File "C:\Users\dokul\Desktop\robot\th_poller\config_hud.py", line 6689, in main
+    hud = OldCompactHUD()
+          ^^^^^^^^^^^^^^^
+  File "C:\Users\dokul\Desktop\robot\th_poller\config_hud.py", line 36, in __init__
+    self._build_ui()
+  File "C:\Users\dokul\Desktop\robot\th_poller\config_hud.py", line 4238, in _build_ui
+    self._refresh_status_counts = _refresh_status_counts
+                                  ^^^^^^^^^^^^^^^^^^^^^^
+NameError: name '_refresh_status_counts' is not defined
+
+[DIAG] __main__ entry
+[DIAG] Tkinter imported
+[DIAG] Tk root created
+[DIAG] Tk root withdrawn
+[2025-11-05 01:28:58] config_hud.py main() entry
+[2025-11-05 01:28:58] Tk root created
+[2025-11-05 01:28:58] Exception: name '_refresh_status_counts' is not defined
+Traceback (most recent call last):
+  File "C:\Users\dokul\Desktop\robot\th_poller\config_hud.py", line 6691, in main
+    hud = OldCompactHUD()
+          ^^^^^^^^^^^^^^^
+  File "C:\Users\dokul\Desktop\robot\th_poller\config_hud.py", line 36, in __init__
+    self._build_ui()
+  File "C:\Users\dokul\Desktop\robot\th_poller\config_hud.py", line 4240, in _build_ui
+    self._refresh_status_counts = _refresh_status_counts
+                                  ^^^^^^^^^^^^^^^^^^^^^^
+NameError: name '_refresh_status_counts' is not defined
+

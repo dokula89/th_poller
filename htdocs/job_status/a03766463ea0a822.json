@@ -1,0 +1,14 @@
+{
+    "status": "error",
+    "percent": 100,
+    "message": "Exception: basename(): Argument #1 ($path) must be of type string, null given",
+    "log": [
+        "[10:12:50] [PHP] Validating inputs",
+        "[10:12:50] [PHP] Parsing locally",
+        "[10:12:50] [PHP] Parsed 2 listings",
+        "[10:12:50] [PHP] Exception: basename(): Argument #1 ($path) must be of type string, null given"
+    ],
+    "result": null,
+    "started_at": 1762852370,
+    "updated": 1762852370
+}

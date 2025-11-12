@@ -1,0 +1,31 @@
+{
+    "status": "done",
+    "percent": 100,
+    "message": "Completed",
+    "log": [
+        "[22:33:33] Validating inputs",
+        "[22:33:33] Parsing locally",
+        "[22:34:50] Parsed 182 listings",
+        "[22:34:50] Uploading JSON via SFTP",
+        "[22:34:59] Uploading source HTML via SFTP",
+        "[22:35:12] Completed"
+    ],
+    "result": {
+        "savePath": "C:\\Users\\dokul\\Desktop\\robot\\th_poller\\Captures\\2025-10-29\\extracted_listings_20251029_223450.json",
+        "sftp": {
+            "success": true,
+            "status": 226,
+            "body": ""
+        },
+        "http": null,
+        "htmlSftp": {
+            "success": true,
+            "status": 226,
+            "body": ""
+        },
+        "listingsCount": 182,
+        "method": "local",
+        "model": "gpt-4o-mini"
+    },
+    "updated": 1761773712
+}
