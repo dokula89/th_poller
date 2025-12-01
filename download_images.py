@@ -97,25 +97,21 @@ def process_json_file(json_path):
             print(f"\n[{idx}/{total_listings}] 📷 Listing: {listing_id}")
             print(f"   Found {len(urls)} image(s)")
             
-            # Download each image
-            for img_idx, url in enumerate(urls, 1):
+            # Download only the first image as thumbnail
+            for img_idx, url in enumerate(urls[:1], 1):
                 # Get file extension from URL
                 parsed_url = urlparse(url)
                 path_parts = parsed_url.path.split('/')
                 original_filename = path_parts[-1] if path_parts else 'image.jpg'
                 
                 # Get extension (default to .jpg if not found)
-                ext = os.path.splitext(original_filename)[1]
+                ext = os.path.splitext(original_filename)[1].lower()
                 if not ext or ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
                     ext = '.jpg'
                 
-                # Create unique filename using listing_id
-                if len(urls) > 1:
-                    # Multiple images: listing_id_1.jpg, listing_id_2.jpg, etc.
-                    filename = f"{listing_id}_{img_idx}{ext}"
-                else:
-                    # Single image: listing_id.jpg
-                    filename = f"{listing_id}{ext}"
+                # Create filename using listing_id + extension (no hash, no index)
+                # For multiple images, only save the first one as thumbnail
+                filename = f"{listing_id}{ext}"
                 
                 save_path = os.path.join(output_dir, filename)
                 

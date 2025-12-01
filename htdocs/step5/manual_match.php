@@ -466,40 +466,97 @@ function read_json_file(string $file) {
   return [$data, null];
 }
 
+/**
+ * Strip apartment/unit numbers from addresses to prevent duplicate google_addresses entries.
+ * Patterns match: #208, Unit 302, Apt 334, - 00A, trailing digits like 101, 229, 334
+ */
+function strip_unit_from_address(string $address): string {
+  $original = $address;
+  
+  // Pattern 1: Remove " 334, " style units before city (e.g., "4555 15th Ave. NE 334, Seattle")
+  $address = preg_replace('/\s+\d{1,4}(?:[A-D])?,\s+/', ' ', $address);
+  
+  // Pattern 2: Remove " - 00A, " style units (e.g., "15250 10th Ave SW - 00A, Burien")
+  $address = preg_replace('/\s+-\s*\d+[A-Za-z]?,\s+/', ' ', $address);
+  
+  // Pattern 3: Remove #208 at end
+  $address = preg_replace('/\s*#\d+.*$/', '', $address);
+  
+  // Pattern 4: Remove ", Apt 302" or ", Unit 101"
+  $address = preg_replace('/,\s*(?:Apt\.?|Unit|Suite)\s+[A-Za-z0-9]+/i', '', $address);
+  
+  // Pattern 5: Remove "Unit 302" or "Apt 302" mid-address
+  $address = preg_replace('/\s+(?:Apt\.?|Unit|Suite)\s+[A-Za-z0-9]+/i', '', $address);
+  
+  // Pattern 6: Remove trailing unit numbers like " 101" or " 229" at end
+  $address = preg_replace('/\s+[A-Za-z]?\d{2,4}[A-Za-z]?$/', '', $address);
+  
+  // Pattern 7: Clean up multiple spaces
+  $address = preg_replace('/\s+/', ' ', $address);
+  
+  // Pattern 8: Clean up extra commas
+  $address = preg_replace('/,\s*,/', ',', $address);
+  
+  // Pattern 9: Clean up leading/trailing whitespace
+  $address = trim($address);
+  
+  return $address;
+}
+
 /** Return the Google-derived address from JSON if present; otherwise fall back to prior heuristics. */
 function extract_google_address(array $item): ?string {
+  $raw_address = null;
+  
   if (!empty($item['google_address']) && is_string($item['google_address'])) {
-    return trim($item['google_address']);
+    $raw_address = trim($item['google_address']);
   }
+  
   // Fallbacks (kept from previous implementation)
-  $google_keys = [
-    'Google_Maps_Address','GoogleAddress','Google_Address','GoogleFormattedAddress',
-    'Fulladdress','FullAddress','formatted_address','formattedAddress',
-    'full_address'
-  ];
-  foreach ($google_keys as $k) {
-    if (!empty($item[$k]) && is_string($item[$k])) {
-      return trim($item[$k]);
+  if ($raw_address === null) {
+    $google_keys = [
+      'Google_Maps_Address','GoogleAddress','Google_Address','GoogleFormattedAddress',
+      'Fulladdress','FullAddress','formatted_address','formattedAddress',
+      'full_address'
+    ];
+    foreach ($google_keys as $k) {
+      if (!empty($item[$k]) && is_string($item[$k])) {
+        $raw_address = trim($item[$k]);
+        break;
+      }
     }
   }
-  $generic_keys = ['address','Address','location','Location'];
-  foreach ($generic_keys as $k) {
-    if (!empty($item[$k]) && is_string($item[$k])) {
-      return trim($item[$k]);
+  
+  if ($raw_address === null) {
+    $generic_keys = ['address','Address','location','Location'];
+    foreach ($generic_keys as $k) {
+      if (!empty($item[$k]) && is_string($item[$k])) {
+        $raw_address = trim($item[$k]);
+        break;
+      }
     }
   }
-  $parts = [];
-  foreach (['street','Street','line1','address1'] as $k) if (!empty($item[$k])) $parts[] = $item[$k];
-  $city = $item['city'] ?? $item['City'] ?? null;
-  $st   = $item['state'] ?? $item['State'] ?? null;
-  $zip  = $item['zip'] ?? $item['Zip'] ?? $item['postal_code'] ?? null;
-  if ($city || $st || $zip) {
-    $csz = trim(trim(($city ?? '').', '.($st ?? '')), ', ');
-    if ($zip) $csz = trim($csz.' '.$zip);
-    if ($csz !== '') $parts[] = $csz;
+  
+  if ($raw_address === null) {
+    $parts = [];
+    foreach (['street','Street','line1','address1'] as $k) if (!empty($item[$k])) $parts[] = $item[$k];
+    $city = $item['city'] ?? $item['City'] ?? null;
+    $st   = $item['state'] ?? $item['State'] ?? null;
+    $zip  = $item['zip'] ?? $item['Zip'] ?? $item['postal_code'] ?? null;
+    if ($city || $st || $zip) {
+      $csz = trim(trim(($city ?? '').', '.($st ?? '')), ', ');
+      if ($zip) $csz = trim($csz.' '.$zip);
+      if ($csz !== '') $parts[] = $csz;
+    }
+    $raw_address = trim(implode(', ', array_filter($parts, fn($v)=>trim((string)$v)!=='')));
+    if ($raw_address === '') $raw_address = null;
   }
-  $addr = trim(implode(', ', array_filter($parts, fn($v)=>trim((string)$v)!=='')));
-  return $addr !== '' ? $addr : null;
+  
+  // Strip unit numbers from the address before returning
+  if ($raw_address !== null) {
+    $raw_address = strip_unit_from_address($raw_address);
+  }
+  
+  return $raw_address;
 }
 
 /** Simple GET JSON via cURL */

@@ -67,20 +67,25 @@ def extract_unique_id_from_url(url: str) -> str:
 
 
 def download_image(url: str, listing_id: str) -> Optional[str]:
-    """Download an image and save it to the images folder. Returns relative path."""
+    """Download an image and save it to the images folder. Returns filename with extension only."""
     if not url or not url.startswith('http'):
         return None
     
     try:
-        # Generate filename from URL
+        # Get file extension from URL
         parsed = urlparse(url)
-        ext = Path(parsed.path).suffix or '.jpg'
-        filename = f"{listing_id}_{hashlib.md5(url.encode()).hexdigest()[:8]}{ext}"
+        ext = Path(parsed.path).suffix.lower()
+        # Validate extension, default to .jpg if invalid
+        if not ext or ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+            ext = '.jpg'
+        
+        # Filename is just listing_id + extension
+        filename = f"{listing_id}{ext}"
         filepath = IMAGES_DIR / filename
         
         # Skip if already exists
         if filepath.exists():
-            return f"images/{filename}"
+            return filename
         
         # Download
         response = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
@@ -89,7 +94,7 @@ def download_image(url: str, listing_id: str) -> Optional[str]:
         # Save
         filepath.write_bytes(response.content)
         print(f"  ✓ Downloaded image: {filename}")
-        return f"images/{filename}"
+        return filename
         
     except Exception as e:
         print(f"  ✗ Failed to download image {url}: {e}")
@@ -222,22 +227,32 @@ def process_html_file(html_file: Path) -> List[Dict]:
         # Process each listing
         processed = []
         for idx, listing in enumerate(listings, 1):
-            # Extract unique ID from listing URL
-            listing_url = listing.get('listing_website') or listing.get('apply_now_link') or ''
-            unique_id = extract_unique_id_from_url(listing_url)
+            # Use listing_id from JSON if available, otherwise extract from URL
+            unique_id = listing.get('listing_id')
+            if not unique_id:
+                listing_url = listing.get('listing_website') or listing.get('apply_now_link') or ''
+                unique_id = extract_unique_id_from_url(listing_url)
             
-            # Download image if present
-            # Keep the original source URL in 'img_urls' and store local saved path in 'image_url'
-            original_img_url = listing.get('img_urls')
-            if original_img_url:
-                local_img_path = download_image(original_img_url, unique_id)
-                if local_img_path:
-                    # Where the image was uploaded/saved locally (relative path under Captures)
-                    listing['image_url'] = local_img_path
-                    # Preserve original remote URL in img_urls
-                    listing['img_urls'] = original_img_url
+            # Handle thumbnail_url from existing image_filename or download new image
+            if listing.get('image_filename'):
+                # Use existing image_filename as thumbnail_url
+                listing['thumbnail_url'] = listing['image_filename']
+                listing['image_url'] = f"images/{listing['image_filename']}"
+            else:
+                # Download image if present
+                original_img_url = listing.get('img_urls')
+                if original_img_url:
+                    # Download and get filename with extension (e.g., "listing_id.jpg")
+                    thumbnail_filename = download_image(original_img_url, unique_id)
+                    if thumbnail_filename:
+                        # Store just the filename in thumbnail_url
+                        listing['thumbnail_url'] = thumbnail_filename
+                        # Keep the remote URL in img_urls (don't add thumbnail to it)
+                        listing['img_urls'] = original_img_url
+                        # Also set image_url for backward compatibility
+                        listing['image_url'] = f"images/{thumbnail_filename}"
             
-            # Add metadata
+            # Add metadata (use unique_id as the database id)
             listing['id'] = unique_id
             listing['network'] = html_file.stem  # e.g., "networks_1"
             listing['time_created'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -270,6 +285,7 @@ def process_html_file(html_file: Path) -> List[Dict]:
                 'details': None,
                 'amenities': None,
                 'image_url': None,
+                'thumbnail_url': None,
                 'Balcony': None,
                 'Cats': None,
                 'Dogs': None,

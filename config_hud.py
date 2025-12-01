@@ -20,6 +20,7 @@ from config_hud_db import update_db_status
 from config_helpers import launch_manual_browser, launch_manual_browser_docked_right, launch_manual_browser_docked_left
 import threading
 import re
+import webbrowser
 from tkinter import messagebox
 
 # Global dictionary to store address match completion callbacks
@@ -44,6 +45,9 @@ class OldCompactHUD:
         self._r_count = 0
         self._d_count = 0
         self._e_count = 0
+
+        # Check for git updates (once per day)
+        self._check_and_update_from_git()
 
         # Build UI on main thread
         self._build_ui()
@@ -76,6 +80,147 @@ class OldCompactHUD:
 
     def is_paused(self) -> bool:
         return self._paused
+    
+    def _check_and_update_from_git(self):
+        """Check for git updates once per day and auto-update if new version available"""
+        try:
+            from pathlib import Path
+            from datetime import datetime, timedelta
+            import subprocess
+            
+            # Get the repository root directory
+            repo_dir = Path(__file__).parent
+            last_check_file = repo_dir / ".last_git_check"
+            
+            # Check if we need to update (once per day)
+            should_check = True
+            if last_check_file.exists():
+                try:
+                    last_check_time = datetime.fromtimestamp(last_check_file.stat().st_mtime)
+                    if datetime.now() - last_check_time < timedelta(days=1):
+                        should_check = False
+                        print(f"[Git Update] Last checked {(datetime.now() - last_check_time).seconds // 3600}h ago, skipping")
+                except Exception as e:
+                    print(f"[Git Update] Error reading last check time: {e}")
+            
+            if not should_check:
+                return
+            
+            print("[Git Update] Checking for updates...")
+            log_to_file("[Git Update] Checking for updates...")
+            
+            # Fetch latest from remote
+            try:
+                subprocess.run(
+                    ["git", "fetch", "origin"],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    timeout=30,
+                    check=True
+                )
+            except subprocess.TimeoutExpired:
+                print("[Git Update] Fetch timed out")
+                log_to_file("[Git Update] Fetch timed out")
+                return
+            except subprocess.CalledProcessError as e:
+                error_msg = e.stderr.decode() if e.stderr else str(e)
+                print(f"[Git Update] Fetch failed: {error_msg}")
+                log_to_file(f"[Git Update] Fetch failed: {error_msg}")
+                return
+            except FileNotFoundError:
+                print("[Git Update] Git not found. Please install git.")
+                log_to_file("[Git Update] Git not found. Please install git.")
+                return
+            
+            # Check if there are updates
+            try:
+                result = subprocess.run(
+                    ["git", "rev-list", "HEAD...origin/main", "--count"],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    timeout=10,
+                    text=True,
+                    check=True
+                )
+                commits_behind = int(result.stdout.strip())
+            except Exception as e:
+                print(f"[Git Update] Error checking commits: {e}")
+                # Update last check time even if check failed
+                last_check_file.touch()
+                return
+            
+            if commits_behind > 0:
+                print(f"[Git Update] Found {commits_behind} new commit(s). Updating...")
+                log_to_file(f"[Git Update] Found {commits_behind} new commit(s). Updating...")
+                
+                # Stash any local changes
+                try:
+                    subprocess.run(
+                        ["git", "stash"],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        timeout=10
+                    )
+                except Exception:
+                    pass
+                
+                # Pull latest changes
+                try:
+                    result = subprocess.run(
+                        ["git", "pull", "origin", "main"],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        timeout=30,
+                        text=True,
+                        check=True
+                    )
+                    print(f"[Git Update] ✓ Updated successfully!")
+                    print(f"[Git Update] {result.stdout}")
+                    log_to_file(f"[Git Update] ✓ Updated successfully! {result.stdout}")
+                    
+                    # Show notification to user
+                    try:
+                        import tkinter as tk
+                        from tkinter import messagebox
+                        root = tk.Tk()
+                        root.withdraw()
+                        messagebox.showinfo(
+                            "Queue Poller Updated",
+                            f"Queue Poller has been updated with {commits_behind} new commit(s).\n\n"
+                            "Please restart the application to use the latest version."
+                        )
+                        root.destroy()
+                    except Exception:
+                        pass
+                    
+                except subprocess.CalledProcessError as e:
+                    error_msg = e.stderr.decode() if e.stderr else str(e)
+                    print(f"[Git Update] Pull failed: {error_msg}")
+                    log_to_file(f"[Git Update] Pull failed: {error_msg}")
+                    # Try to recover
+                    try:
+                        subprocess.run(
+                            ["git", "reset", "--hard", "origin/main"],
+                            cwd=repo_dir,
+                            capture_output=True,
+                            timeout=10
+                        )
+                        print("[Git Update] ✓ Force updated to latest version")
+                        log_to_file("[Git Update] ✓ Force updated to latest version")
+                    except Exception as reset_err:
+                        print(f"[Git Update] Reset failed: {reset_err}")
+                        log_to_file(f"[Git Update] Reset failed: {reset_err}")
+            else:
+                print("[Git Update] Already up to date")
+                log_to_file("[Git Update] Already up to date")
+            
+            # Update last check time
+            last_check_file.touch()
+            
+        except Exception as e:
+            print(f"[Git Update] Error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _clear_ai_text(self):
         """Clear the AI text area"""
@@ -184,33 +329,329 @@ class OldCompactHUD:
         min_btn.bind("<Button-1>", lambda e: root.iconify())
 
         # VPN Button and Location
+        # Metro to NordVPN city mapping
+        METRO_TO_VPN_CITY = {
+            "Seattle": "seattle",
+            "Tacoma": "seattle",
+            "Bellevue": "seattle",
+            "Everett": "seattle",
+            "Spokane": "seattle",
+            "Portland": "portland",
+            "Beaverton": "portland",
+            "Gresham": "portland",
+            "Salem": "portland",
+            "Eugene": "portland",
+            "Los Angeles": "los_angeles",
+            "San Francisco": "san_francisco",
+            "San Diego": "san_diego",
+            "Phoenix": "phoenix",
+            "Denver": "denver",
+            "Dallas": "dallas",
+            "Houston": "houston",
+            "Chicago": "chicago",
+            "New York": "new_york",
+            "Boston": "boston",
+            "Atlanta": "atlanta",
+            "Miami": "miami",
+        }
+        
         vpn_location_var = tk.StringVar(value="Not connected")
-        def connect_vpn():
+        vpn_connected = [False]  # Use list for mutable reference
+        
+        def get_vpn_status():
+            """Get current VPN connection status and location"""
             import subprocess
             try:
-                subprocess.run(["nordvpn", "connect"], check=True, shell=True)
-                result = subprocess.run(["nordvpn", "status"], capture_output=True, text=True, shell=True)
-                location = "Unknown"
-                for line in result.stdout.splitlines():
-                    if "Country:" in line:
-                        location = line.split(":", 1)[1].strip()
-                        break
-                vpn_location_var.set(location)
+                log_to_file(f"[VPN] Checking status with command: nordvpn status")
+                result = subprocess.run(["nordvpn", "status"], capture_output=True, text=True, shell=True, timeout=10)
+                
+                log_to_file(f"[VPN] Status command return code: {result.returncode}")
+                log_to_file(f"[VPN] Status stdout: {result.stdout[:500]}")
+                log_to_file(f"[VPN] Status stderr: {result.stderr[:500]}")
+                
+                output = result.stdout
+                status = {}
+                for line in output.splitlines():
+                    if ":" in line:
+                        key, val = line.split(":", 1)
+                        status[key.strip()] = val.strip()
+                
+                log_to_file(f"[VPN] Parsed status: {status}")
+                
+                # Check if connected
+                if status.get("Status") == "Connected":
+                    city = status.get("City", "")
+                    country = status.get("Country", "")
+                    location = f"{city}, {country}" if city and country else country or city or "Connected"
+                    log_to_file(f"[VPN] Status check result: Connected to {location}")
+                    return True, location
+                else:
+                    log_to_file(f"[VPN] Status check result: Not connected (status={status.get('Status', 'unknown')})")
+                    return False, "Not connected"
+            except Exception as e:
+                log_to_file(f"[VPN] Status check error: {e}")
+                log_to_file(f"[VPN] Status check traceback: {tb.format_exc()}")
+                return False, "Status unavailable"
+        
+        def connect_vpn():
+            """Connect to VPN based on selected metro"""
+            import subprocess
+            try:
+                vpn_location_var.set("Connecting...")
+                vpn_btn.config(text="VPN", bg="#F39C12")  # Orange for connecting
+                
+                # Get selected metro
+                selected_metro = self._selected_metro.get() if hasattr(self, '_selected_metro') else "Seattle"
+                
+                # Map metro to VPN city
+                vpn_city = METRO_TO_VPN_CITY.get(selected_metro, "seattle")
+                
+                log_to_file(f"[VPN] Connecting to {vpn_city} (metro: {selected_metro})...")
+                log_to_file(f"[VPN] Command: nordvpn connect {vpn_city}")
+                
+                # Connect to specific city
+                result = subprocess.run(["nordvpn", "connect", vpn_city], 
+                                      capture_output=True, text=True, shell=True, timeout=30)
+                
+                log_to_file(f"[VPN] Connect command return code: {result.returncode}")
+                log_to_file(f"[VPN] Connect stdout: {result.stdout[:1000]}")
+                log_to_file(f"[VPN] Connect stderr: {result.stderr[:1000]}")
+                
+                # Check if command succeeded
+                if result.returncode != 0:
+                    log_to_file(f"[VPN] Connect command failed with code {result.returncode}")
+                    error_msg = result.stderr or result.stdout or "Unknown error"
+                    log_to_file(f"[VPN] Error message: {error_msg}")
+                    
+                    # Check if NordVPN is not installed
+                    if "not recognized" in error_msg.lower() or "not found" in error_msg.lower():
+                        vpn_location_var.set("Not installed")
+                        vpn_btn.config(text="VPN", bg="#E74C3C")
+                        vpn_connected[0] = False
+                        
+                        # Show installation dialog
+                        self._root.after(0, lambda: show_nordvpn_install_dialog())
+                        return
+                    
+                    vpn_location_var.set("Connection error")
+                    vpn_btn.config(text="VPN", bg="#E74C3C")
+                    vpn_connected[0] = False
+                    return
+                
+                # Wait a moment for connection to establish
+                log_to_file(f"[VPN] Waiting 2 seconds for connection to establish...")
+                time.sleep(2)
+                
+                # Get updated status
+                log_to_file(f"[VPN] Checking connection status...")
+                connected, location = get_vpn_status()
+                vpn_connected[0] = connected
+                
+                if connected:
+                    vpn_location_var.set(location)
+                    vpn_btn.config(text="VPN", bg="#27AE60")  # Green for connected
+                    log_to_file(f"[VPN] Successfully connected: {location}")
+                else:
+                    vpn_location_var.set("Connection failed")
+                    vpn_btn.config(text="VPN", bg="#E74C3C")  # Red for failed
+                    log_to_file(f"[VPN] Connection failed - status check returned not connected")
+                    
+            except subprocess.TimeoutExpired:
+                vpn_location_var.set("Connection timeout")
+                vpn_btn.config(text="VPN", bg="#E74C3C")
+                log_to_file(f"[VPN] Connection timeout after 30 seconds")
+                log_to_file(f"[VPN] This may indicate NordVPN is not responding or taking too long")
             except Exception as e:
                 vpn_location_var.set("Error")
+                vpn_btn.config(text="VPN", bg="#E74C3C")
                 log_to_file(f"[VPN] Connection error: {e}")
+        
+        def disconnect_vpn():
+            """Disconnect from VPN"""
+            import subprocess
+            try:
+                log_to_file(f"[VPN] Disconnecting from VPN...")
+                vpn_location_var.set("Disconnecting...")
+                vpn_btn.config(text="VPN", bg="#F39C12")
+                
+                log_to_file(f"[VPN] Command: nordvpn disconnect")
+                result = subprocess.run(["nordvpn", "disconnect"], capture_output=True, text=True, shell=True, timeout=10)
+                
+                log_to_file(f"[VPN] Disconnect command return code: {result.returncode}")
+                log_to_file(f"[VPN] Disconnect stdout: {result.stdout[:500]}")
+                log_to_file(f"[VPN] Disconnect stderr: {result.stderr[:500]}")
+                
+                time.sleep(1)
+                
+                vpn_connected[0] = False
+                vpn_location_var.set("Not connected")
+                vpn_btn.config(text="VPN", bg="#34495E")
+                log_to_file(f"[VPN] Successfully disconnected")
+            except Exception as e:
+                vpn_location_var.set("Disconnect error")
+                vpn_btn.config(text="VPN", bg="#E74C3C")
+                log_to_file(f"[VPN] Disconnect error: {e}")
+                log_to_file(f"[VPN] Disconnect traceback: {tb.format_exc()}")
+        
+        def show_nordvpn_install_dialog():
+            """Show dialog with NordVPN installation instructions"""
+            dialog = tk.Toplevel(self._root)
+            dialog.title("NordVPN Not Installed")
+            dialog.geometry("650x450")
+            dialog.configure(bg="#F8F9FA")
+            dialog.transient(self._root)
+            dialog.grab_set()
+            
+            # Center dialog
+            dialog.update_idletasks()
+            x = (dialog.winfo_screenwidth() // 2) - (650 // 2)
+            y = (dialog.winfo_screenheight() // 2) - (450 // 2)
+            dialog.geometry(f"650x450+{x}+{y}")
+            
+            # Header
+            header_frame = tk.Frame(dialog, bg="#E74C3C", height=60)
+            header_frame.pack(fill="x")
+            header_frame.pack_propagate(False)
+            
+            tk.Label(header_frame, text="⚠ NordVPN CLI Not Found", bg="#E74C3C", fg="white",
+                    font=("Segoe UI", 14, "bold")).pack(pady=15)
+            
+            # Content
+            content = tk.Frame(dialog, bg="#F8F9FA")
+            content.pack(fill="both", expand=True, padx=20, pady=20)
+            
+            tk.Label(content, text="The NordVPN command-line tool is not installed or not in your system PATH.",
+                    bg="#F8F9FA", fg="#2C3E50", font=("Segoe UI", 10), wraplength=580, justify="left").pack(anchor="w", pady=(0, 15))
+            
+            # Installation steps
+            steps_frame = tk.Frame(content, bg="white", relief="solid", borderwidth=1)
+            steps_frame.pack(fill="both", expand=True, pady=10)
+            
+            steps_content = tk.Text(steps_frame, bg="white", fg="#2C3E50", font=("Segoe UI", 9),
+                                   wrap="word", relief="flat", padx=15, pady=15, height=12)
+            steps_content.pack(fill="both", expand=True)
+            
+            install_text = """To use VPN features, install NordVPN CLI:
+
+1. Download NordVPN:
+   • Visit: https://nordvpn.com/download/windows/
+   • Download and install the NordVPN app
+
+2. Install NordVPN CLI (Command Line Interface):
+   • Open PowerShell as Administrator
+   • Run: winget install NordVPN.NordVPN
+   
+   OR download from: https://downloads.nordcdn.com/apps/windows/NordVPN/latest/NordVPNSetup.exe
+
+3. After installation:
+   • Restart this application
+   • Log in to NordVPN app first
+   • Then use the VPN button in this HUD
+
+4. Verify installation:
+   • Open Command Prompt or PowerShell
+   • Type: nordvpn --version
+   • Should show version number
+
+Note: You need an active NordVPN subscription to use the VPN feature."""
+            
+            steps_content.insert("1.0", install_text)
+            steps_content.config(state="disabled")
+            
+            # Buttons
+            btn_frame = tk.Frame(content, bg="#F8F9FA")
+            btn_frame.pack(pady=(10, 0))
+            
+            def open_download():
+                import webbrowser
+                webbrowser.open("https://nordvpn.com/download/windows/")
+                dialog.destroy()
+            
+            tk.Button(btn_frame, text="Open Download Page", command=open_download,
+                     bg="#3498DB", fg="white", font=("Segoe UI", 10, "bold"),
+                     padx=20, pady=8, relief="flat", cursor="hand2").pack(side="left", padx=5)
+            
+            tk.Button(btn_frame, text="OK", command=dialog.destroy,
+                     bg="#95A5A6", fg="white", font=("Segoe UI", 10, "bold"),
+                     padx=30, pady=8, relief="flat", cursor="hand2").pack(side="left", padx=5)
+        
+        def toggle_vpn():
+            """Toggle VPN connection on/off"""
+            # Check if VPN shows as not installed
+            current_status = vpn_location_var.get()
+            if "not installed" in current_status.lower() or "not found" in current_status.lower():
+                show_nordvpn_install_dialog()
+                return
+            
+            log_to_file(f"[VPN] Toggle clicked - current state: {'connected' if vpn_connected[0] else 'disconnected'}")
+            if vpn_connected[0]:
+                threading.Thread(target=disconnect_vpn, daemon=True).start()
+            else:
+                threading.Thread(target=connect_vpn, daemon=True).start()
         
         vpn_frame = tk.Frame(header, bg=bg)
         vpn_frame.pack(side="right", padx=(6, 0))
         vpn_btn = tk.Label(vpn_frame, text="VPN", fg="#FFFFFF", bg="#34495E", font=("Segoe UI", 9, "bold"), padx=8, pady=2, cursor="hand2")
         vpn_btn.pack(side="left")
-        vpn_btn.bind("<Button-1>", lambda e: threading.Thread(target=connect_vpn, daemon=True).start())
-        vpn_btn.bind("<Enter>", lambda e: vpn_btn.config(bg="#4A6278"))
-        vpn_btn.bind("<Leave>", lambda e: vpn_btn.config(bg="#34495E"))
+        vpn_btn.bind("<Button-1>", lambda e: toggle_vpn())
+        vpn_btn.bind("<Enter>", lambda e: vpn_btn.config(bg="#4A6278") if not vpn_connected[0] else None)
+        vpn_btn.bind("<Leave>", lambda e: vpn_btn.config(bg="#34495E") if not vpn_connected[0] else vpn_btn.config(bg="#27AE60"))
         vpn_loc_lbl = tk.Label(vpn_frame, textvariable=vpn_location_var, fg=fg, bg=bg, font=("Segoe UI", 9))
         vpn_loc_lbl.pack(side="left", padx=(8, 0))
-        # Connect to VPN on startup
-        root.after(500, lambda: threading.Thread(target=connect_vpn, daemon=True).start())
+        
+        # Check VPN status on startup
+        def check_startup_vpn():
+            import subprocess
+            log_to_file(f"[VPN] Checking VPN status on startup...")
+            
+            # First verify NordVPN CLI is installed
+            try:
+                log_to_file(f"[VPN] Verifying NordVPN CLI installation...")
+                version_result = subprocess.run(["nordvpn", "--version"], 
+                                               capture_output=True, text=True, shell=True, timeout=5)
+                log_to_file(f"[VPN] NordVPN version check return code: {version_result.returncode}")
+                log_to_file(f"[VPN] NordVPN version: {version_result.stdout.strip()}")
+                
+                if version_result.returncode != 0:
+                    error_msg = version_result.stderr or version_result.stdout or ""
+                    log_to_file(f"[VPN] ERROR: NordVPN CLI not found or not working")
+                    log_to_file(f"[VPN] stderr: {error_msg}")
+                    
+                    if "not recognized" in error_msg.lower() or "not found" in error_msg.lower():
+                        vpn_location_var.set("Not installed")
+                        vpn_btn.config(bg="#E74C3C")
+                        # Show installation instructions on first startup
+                        self._root.after(100, lambda: show_nordvpn_install_dialog())
+                    else:
+                        vpn_location_var.set("NordVPN error")
+                        vpn_btn.config(bg="#E74C3C")
+                    return
+            except FileNotFoundError:
+                log_to_file(f"[VPN] ERROR: nordvpn command not found in PATH")
+                vpn_location_var.set("Not installed")
+                vpn_btn.config(bg="#E74C3C")
+                self._root.after(100, lambda: show_nordvpn_install_dialog())
+                return
+            except Exception as e:
+                log_to_file(f"[VPN] ERROR: Failed to check NordVPN installation: {e}")
+                log_to_file(f"[VPN] Traceback: {tb.format_exc()}")
+                vpn_location_var.set("VPN check failed")
+                vpn_btn.config(bg="#E74C3C")
+                return
+            
+            # Now check connection status
+            connected, location = get_vpn_status()
+            vpn_connected[0] = connected
+            vpn_location_var.set(location)
+            if connected:
+                vpn_btn.config(bg="#27AE60")
+                log_to_file(f"[VPN] Startup check: Already connected to {location}")
+            else:
+                vpn_btn.config(bg="#34495E")
+                log_to_file(f"[VPN] Startup check: Not connected")
+        
+        log_to_file(f"[VPN] Scheduling startup VPN check in 500ms...")
+        root.after(500, lambda: threading.Thread(target=check_startup_vpn, daemon=True).start())
 
         # Logout button (replaces Pause)
         self._btn = tk.Label(header, text="Logout", fg="#FFFFFF", bg="#E74C3C", font=("Segoe UI", 9, "bold"), padx=8, pady=2, cursor="hand2")
@@ -255,8 +696,53 @@ class OldCompactHUD:
         sync_btn.pack(side="left", padx=(6, 0))
         sync_btn.bind("<Enter>", lambda e: sync_btn.config(bg="#1ABC9C"))
         sync_btn.bind("<Leave>", lambda e: sync_btn.config(bg="#16A085"))
+        
+        # Update sync button with stats
+        def update_sync_button_stats():
+            try:
+                import mysql.connector
+                conn = mysql.connector.connect(
+                    host='127.0.0.1',
+                    user='root',
+                    password='',
+                    database='offta'
+                )
+                cursor = conn.cursor(dictionary=True)
+                
+                # Count addresses without 911_json
+                cursor.execute("""
+                    SELECT COUNT(*) as count 
+                    FROM google_addresses 
+                    WHERE (911_json IS NULL OR 911_json = '') 
+                    AND latitude IS NOT NULL 
+                    AND longitude IS NOT NULL
+                """)
+                result = cursor.fetchone()
+                unsynced = result['count'] if result else 0
+                
+                cursor.close()
+                conn.close()
+                
+                if unsynced > 0:
+                    sync_btn.config(text=f"🔄 Sync DB ({unsynced})")
+                else:
+                    sync_btn.config(text="🔄 Sync DB ✓")
+            except Exception as e:
+                log_to_file(f"[Sync Stats] Error updating button: {e}")
+        
+        # Initial stats update
+        try:
+            update_sync_button_stats()
+        except:
+            pass
 
-        # Ensure the window is wide enough to fit Accounts, Notifications, Extractor, Sync DB, Logs, Pause, and controls
+        # Expenses button - shows API usage tracking
+        expenses_btn = tk.Label(actions, text="💰 Expenses", fg=bg, bg="#F39C12", font=("Segoe UI", 9, "bold"), padx=8, pady=2, cursor="hand2")
+        expenses_btn.pack(side="left", padx=(6, 0))
+        expenses_btn.bind("<Enter>", lambda e: expenses_btn.config(bg="#FFB84D"))
+        expenses_btn.bind("<Leave>", lambda e: expenses_btn.config(bg="#F39C12"))
+
+        # Ensure the window is wide enough to fit Accounts, Notifications, Extractor, Sync DB, Expenses, Logs, Pause, and controls
         try:
             root.update_idletasks()
             # Compute required width based on header content
@@ -494,6 +980,44 @@ class OldCompactHUD:
         except Exception:
             self._metro_pb = None
         
+        # Parcel link display (full width, below Metro, initially hidden)
+        parcel_link_row = tk.Frame(body, bg=bg)
+        parcel_link_row.pack(fill="x", pady=(0, 8))
+        parcel_link_row.pack_forget()  # Hide initially
+        
+        parcel_link_display = tk.Label(
+            parcel_link_row,
+            text="",
+            fg="#3498DB",
+            bg=bg,
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            anchor="w",
+            padx=10,
+            pady=5
+        )
+        parcel_link_display.pack(fill="x", expand=True)
+        
+        # Make link clickable
+        def on_parcel_link_display_click(e):
+            link_text = parcel_link_display.cget("text")
+            if link_text and link_text.startswith("http"):
+                import webbrowser
+                webbrowser.open(link_text)
+                log_to_file(f"[Parcel] Opened link: {link_text}")
+        parcel_link_display.bind("<Button-1>", on_parcel_link_display_click)
+        
+        # Hover effect
+        def on_enter_parcel_display(e):
+            parcel_link_display.config(fg="#2980B9")
+        def on_leave_parcel_display(e):
+            parcel_link_display.config(fg="#3498DB")
+        parcel_link_display.bind("<Enter>", on_enter_parcel_display)
+        parcel_link_display.bind("<Leave>", on_leave_parcel_display)
+        
+        self._parcel_link_row = parcel_link_row
+        self._parcel_link_display = parcel_link_display
+        
         # Loader area (hidden by default)
         loader = tk.Frame(body, bg=bg)
         loader.pack(fill="x")
@@ -556,6 +1080,10 @@ class OldCompactHUD:
                     log_to_file("[Auth] Restoring HUD after successful login")
                     try:
                         root.deiconify()
+                        # Re-apply positioning after showing window
+                        sw = root.winfo_screenwidth()
+                        x_pos = int(sw * 0.20)  # 20% from left edge
+                        root.geometry(f"360x120+{x_pos}+0")  # Position at top of screen
                         root.lift()
                         root.focus_force()
                         root.update()
@@ -686,6 +1214,7 @@ class OldCompactHUD:
         
         self._current_status = tk.StringVar(value="all")
         self._current_table = tk.StringVar(value="queue_websites")
+        self._parcel_json_data = {}  # Store JSON data for parcel items {item_id: json_string}
         # Independent status per table
         self._tab_status = {
             "listing_networks": "all",
@@ -708,6 +1237,7 @@ class OldCompactHUD:
             def on_click(_e):
                 try:
                     log_to_file(f"[Queue] ========== TAB CLICKED: {text} (table_name={table_name}) ==========")
+                    
                     # Show loading indicator for Networks, Parcel, Code, 911 tabs
                     if table_name.lower() in ('listing_networks', 'networks', 'parcel', 'code', '911'):
                         try:
@@ -732,12 +1262,47 @@ class OldCompactHUD:
                         else:
                             accounts_search_frame.pack_forget()
                         
-                        # Show Parcel refresh button only when Parcel tab is active
+                        # Show Parcel refresh button and link display when Parcel tab is active
                         if hasattr(self, '_parcel_refresh_frame'):
                             if table_name.lower() == 'parcel':
+                                log_to_file(f"[Queue] Showing Parcel refresh frame and link")
                                 self._parcel_refresh_frame.pack(side="left", padx=(12, 0))
+                                
+                                # Show and update parcel link display (full width below Metro)
+                                if hasattr(self, '_parcel_link_row'):
+                                    self._parcel_link_row.pack(fill="x", pady=(0, 8), after=self._metro_lbl.master.master)
+                                
+                                # Query database for parcel link
+                                try:
+                                    import mysql.connector
+                                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta')
+                                    cursor = conn.cursor(dictionary=True)
+                                    # Get metro from dropdown
+                                    metro = self._metro_combo.get() if hasattr(self, '_metro_combo') else 'Seattle'
+                                    if not metro or metro == 'All':
+                                        metro = 'Seattle'
+                                    cursor.execute("SELECT parcel_link FROM major_metros WHERE metro_name = %s", (metro,))
+                                    result = cursor.fetchone()
+                                    cursor.close()
+                                    conn.close()
+                                    if result and result.get('parcel_link'):
+                                        link = result['parcel_link']
+                                        log_to_file(f"[Parcel] Setting link display to: {link}")
+                                        if hasattr(self, '_parcel_link_display'):
+                                            self._parcel_link_display.config(text=link)
+                                        if hasattr(self, '_parcel_link_label'):
+                                            self._parcel_link_label.config(text=link)
+                                    else:
+                                        log_to_file(f"[Parcel] No link found for metro: {metro}")
+                                        if hasattr(self, '_parcel_link_display'):
+                                            self._parcel_link_display.config(text="No parcel link available for this metro")
+                                except Exception as link_err:
+                                    log_to_file(f"[Parcel] Error loading link: {link_err}")
                             else:
                                 self._parcel_refresh_frame.pack_forget()
+                                # Hide parcel link row
+                                if hasattr(self, '_parcel_link_row'):
+                                    self._parcel_link_row.pack_forget()
                     except Exception:
                         pass
                     # Metro dropdown is now always visible in the top header; no show/hide per tab
@@ -843,15 +1408,71 @@ class OldCompactHUD:
         parcel_refresh_btn.bind("<Enter>", on_enter_parcel_refresh)
         parcel_refresh_btn.bind("<Leave>", on_leave_parcel_refresh)
         
+        # Auto Capture button for Parcel tab
+        auto_capture_btn = tk.Button(
+            parcel_refresh_frame,
+            text="🤖 Auto Capture",
+            bg="#27AE60",
+            fg="#fff",
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=1,
+            relief="flat",
+            cursor="hand2",
+            command=lambda: self._start_auto_capture() if hasattr(self, '_start_auto_capture') else None
+        )
+        auto_capture_btn.pack(side="left", padx=(6, 0))
+        
+        # Hover effects for auto capture button
+        def on_enter_auto_capture(e):
+            auto_capture_btn.config(bg="#229954")
+        def on_leave_auto_capture(e):
+            auto_capture_btn.config(bg="#27AE60")
+        auto_capture_btn.bind("<Enter>", on_enter_auto_capture)
+        auto_capture_btn.bind("<Leave>", on_leave_auto_capture)
+        
+        self._auto_capture_btn = auto_capture_btn
+        self._auto_capture_running = False
+        
+        # Parcel link display (shows the parcel viewer URL)
+        parcel_link_label = tk.Label(
+            parcel_refresh_frame,
+            text="",
+            fg=muted,
+            bg=chip_bg,
+            font=("Segoe UI", 8),
+            cursor="hand2"
+        )
+        parcel_link_label.pack(side="left", padx=(10, 0))
+        
+        # Make parcel link clickable
+        def on_parcel_link_click(e):
+            link_text = parcel_link_label.cget("text")
+            if link_text and link_text.startswith("http"):
+                import webbrowser
+                webbrowser.open(link_text)
+                log_to_file(f"[Parcel] Opened link from header: {link_text}")
+        parcel_link_label.bind("<Button-1>", on_parcel_link_click)
+        
+        # Hover effect for link
+        def on_enter_link(e):
+            parcel_link_label.config(fg=accent)
+        def on_leave_link(e):
+            parcel_link_label.config(fg=muted)
+        parcel_link_label.bind("<Enter>", on_enter_link)
+        parcel_link_label.bind("<Leave>", on_leave_link)
+        
+        self._parcel_link_label = parcel_link_label
+        
         # Hide by default
         self._parcel_refresh_frame = parcel_refresh_frame
         
         # Treeview table
-        tree_frame = tk.Frame(self._queue_frame, bg=chip_bg)
-        tree_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self._tree_frame = tk.Frame(self._queue_frame, bg=chip_bg)
+        self._tree_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
         
-        cols = ("ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "✏️", "hidden1", "hidden2")
-        self._queue_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=8)
+        cols = ("ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "▶️", "✏️", "hidden1", "hidden2", "hidden3")
+        self._queue_tree = ttk.Treeview(self._tree_frame, columns=cols, show="headings", height=8)
 
         # Configure row tag colors for zebra striping and status-based coloring
         try:
@@ -862,13 +1483,143 @@ class OldCompactHUD:
             self._queue_tree.tag_configure("running_row", background="#FFF3CD")    # light yellow
         except Exception as tag_err:
             log_to_file(f"[Queue] Tag config error: {tag_err}")
+        
+        # Method to recreate tree with different column structure
+        def _recreate_queue_tree(is_parcel=False):
+            """Recreate the tree widget with appropriate column structure"""
+            try:
+                log_to_file(f"[Queue] Starting tree recreation (is_parcel={is_parcel})")
+                
+                # Clear widgets in tree frame
+                for widget in self._tree_frame.winfo_children():
+                    widget.destroy()
+                log_to_file(f"[Queue] Cleared existing widgets from tree frame")
+                
+                # Create new tree with appropriate columns
+                if is_parcel:
+                    cols = ("ID", "Address", "Metro", "Image", "✏️")
+                    log_to_file(f"[Queue] Creating Parcel tree with 5 columns: {cols}")
+                else:
+                    cols = ("ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "▶️", "✏️", "hidden1", "hidden2", "hidden3")
+                    log_to_file(f"[Queue] Creating standard tree with 16 columns")
+                
+                self._queue_tree = ttk.Treeview(self._tree_frame, columns=cols, show="headings", height=8)
+                log_to_file(f"[Queue] Tree widget created")
+                
+                # Configure row tag colors
+                self._queue_tree.tag_configure("even", background="#FFFFFF")
+                self._queue_tree.tag_configure("odd", background="#E6F7FF")
+                self._queue_tree.tag_configure("done_row", background="#D4EDDA")
+                self._queue_tree.tag_configure("error_row", background="#F8D7DA")
+                self._queue_tree.tag_configure("running_row", background="#FFF3CD")
+                log_to_file(f"[Queue] Configured row tags")
+                
+                # Add scrollbar
+                scrollbar = ttk.Scrollbar(self._tree_frame, orient="vertical", command=self._queue_tree.yview)
+                scrollbar.pack(side="right", fill="y")
+                self._queue_tree.configure(yscrollcommand=scrollbar.set)
+                log_to_file(f"[Queue] Added scrollbar")
+                
+                # Pack the tree
+                self._queue_tree.pack(side="left", fill="both", expand=True)
+                log_to_file(f"[Queue] Packed tree widget")
+                
+                # Configure columns with proper labels and widths
+                if is_parcel:
+                    labels = ["ID", "Address", "Metro", "Link", "Data", "✏️"]
+                    widths = [60, 400, 100, 60, 80, 30]
+                else:
+                    labels = ["ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "✏️", "", ""]
+                    widths = [40, 200, 80, 40, 70, 70, 50, 40, 35, 35, 50, 30, 0, 0]
+                
+                # Add sorting functionality for Parcel table
+                def sort_column(col_index, reverse):
+                    """Sort tree contents by column"""
+                    try:
+                        items = [(self._queue_tree.set(k, col_index), k) for k in self._queue_tree.get_children('')]
+                        
+                        # Try to sort numerically if possible, otherwise alphabetically
+                        try:
+                            # Extract numeric part from items like "1. 123" or "❌ No"
+                            def extract_sort_key(item_tuple):
+                                val = item_tuple[0]
+                                # Try to extract first number
+                                import re
+                                match = re.search(r'\d+', str(val))
+                                if match:
+                                    return (0, int(match.group()))
+                                return (1, str(val).lower())
+                            
+                            items.sort(key=extract_sort_key, reverse=reverse)
+                        except:
+                            # Fallback to string sorting
+                            items.sort(key=lambda t: str(t[0]).lower(), reverse=reverse)
+                        
+                        # Rearrange items in sorted positions
+                        for index, (val, k) in enumerate(items):
+                            self._queue_tree.move(k, '', index)
+                        
+                        # Update column heading to show sort direction
+                        for idx, c in enumerate(cols):
+                            if idx == col_index:
+                                arrow = " ▼" if reverse else " ▲"
+                                self._queue_tree.heading(c, text=labels[idx] + arrow,
+                                                        command=lambda c=idx: sort_column(c, not reverse))
+                            else:
+                                self._queue_tree.heading(c, text=labels[idx],
+                                                        command=lambda c=idx: sort_column(c, False))
+                    except Exception as sort_err:
+                        log_to_file(f"[Queue] Sort error: {sort_err}")
+                
+                # Bind column headers for sorting (only for Parcel table)
+                for idx, (c, label) in enumerate(zip(cols, labels)):
+                    if is_parcel:
+                        self._queue_tree.heading(c, text=label, command=lambda col=idx: sort_column(col, False))
+                    else:
+                        self._queue_tree.heading(c, text=label)
+                
+                for c, w in zip(cols, widths):
+                    if w <= 0:
+                        self._queue_tree.column(c, width=0, minwidth=0, stretch=False, anchor="center")
+                    else:
+                        self._queue_tree.column(c, width=w, anchor="center")
+                log_to_file(f"[Queue] Configured {len(cols)} columns")
+                
+                # Bind event handlers (use stored handlers if available)
+                if hasattr(self, '_tree_motion_handler'):
+                    self._queue_tree.bind("<Motion>", self._tree_motion_handler)
+                if hasattr(self, '_tree_click_handler'):
+                    self._queue_tree.bind("<Button-1>", self._tree_click_handler)
+                if hasattr(self, '_tree_leave_handler'):
+                    self._queue_tree.bind("<Leave>", self._tree_leave_handler)
+                # Rebind the safe_tree_click handler (with add="+")
+                if hasattr(self, '_safe_tree_click_handler'):
+                    self._queue_tree.bind("<Button-1>", self._safe_tree_click_handler, add="+")
+                    log_to_file(f"[Queue] Rebound safe_tree_click handler")
+                log_to_file(f"[Queue] Bound event handlers")
+                
+                # Recreate loading overlay (it was destroyed with tree frame children)
+                self._loading_overlay = tk.Label(self._tree_frame, text="⏳ Loading...", fg="#FFFFFF", bg="#2C3E50", 
+                                                 font=("Segoe UI", 12, "bold"), bd=2, relief="raised", padx=20, pady=10)
+                log_to_file(f"[Queue] Recreated loading overlay")
+                
+                log_to_file(f"[Queue] ✓ Tree recreated successfully (parcel={is_parcel}, cols={len(cols)})")
+                
+            except Exception as recreate_err:
+                log_to_file(f"[Queue] ERROR recreating tree: {recreate_err}")
+                import traceback
+                log_to_file(f"[Queue] Traceback: {traceback.format_exc()}")
+        
+        self._recreate_queue_tree = _recreate_queue_tree
 
         # Default column setup
         def _apply_columns(labels, widths):
             try:
-                for c, label in zip(cols, labels):
+                # Get current tree columns dynamically
+                current_cols = self._queue_tree['columns']
+                for c, label in zip(current_cols, labels):
                     self._queue_tree.heading(c, text=label)
-                for c, w in zip(cols, widths):
+                for c, w in zip(current_cols, widths):
                     # If width is 0, hide the column fully (no stretch, minwidth=0)
                     if w <= 0:
                         try:
@@ -880,8 +1631,8 @@ class OldCompactHUD:
             except Exception as _colerr:
                 log_to_file(f"[Queue] Column setup error: {_colerr}")
 
-        DEFAULT_LABELS = ["ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "✏️", "", ""]
-        DEFAULT_WIDTHS = [40, 200, 80, 40, 70, 70, 50, 40, 35, 35, 50, 30, 0, 0]
+        DEFAULT_LABELS = ["#", "ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "▶️", "✏️", "", ""]
+        DEFAULT_WIDTHS = [35, 40, 200, 80, 40, 70, 70, 50, 40, 35, 35, 50, 30, 30, 0, 0]
         _apply_columns(DEFAULT_LABELS, DEFAULT_WIDTHS)
 
         # Helper to dynamically adjust columns per tab
@@ -892,19 +1643,19 @@ class OldCompactHUD:
             widths = DEFAULT_WIDTHS[:]
             try:
                 if t in ("listing_websites", "websites") or custom_source == "websites":
-                    labels[1] = "Website"
-                    labels[3] = "Name"
-                    widths[1] = 260
-                    widths[3] = 180
+                    labels[0] = "#"              # Row counter
+                    labels[2] = "Website"
+                    labels[4] = "Name"
+                    labels[5] = "Avail Website"  # Availability Website
+                    widths[0] = 35               # Row counter width
+                    widths[2] = 260
+                    widths[4] = 150              # Name width (reduced)
+                    widths[5] = 200              # Avail Website width
                 elif t == "parcel":
-                    labels[1] = "Parcel Link"
-                    labels[2] = "Total Addresses"
-                    labels[3] = "Metro"
-                    labels[4] = "Empty Parcels"
-                    widths[1] = 260
-                    widths[2] = 120
-                    widths[3] = 140
-                    widths[4] = 120
+                    # Parcel tab: ID, Address, Metro, Image (Yes/No), Edit
+                    labels = ["ID", "Address", "Metro", "Image", "✏️"]
+                    widths = [60, 450, 100, 60, 30]
+                    log_to_file(f"[Queue] Column config: Using Parcel config (5 columns)")
                 elif t == "accounts" or custom_source == "accounts":
                     labels[1] = "Email"
                     labels[3] = "Name"
@@ -917,12 +1668,24 @@ class OldCompactHUD:
                     widths[2] = 0  # Hide Metro column for Networks
                     log_to_file(f"[Queue] Column config: Using Networks config (Metro hidden)")
                 elif t in ("listing_websites", "websites"):
-                    # Websites table: Change labels - Metro shows "Seattle", Int shows "Avail Website" (building name)
-                    labels[2] = "Metro"           # Column 3: Metro (Seattle)
-                    labels[3] = "Avail Website"   # Column 4: Avail Website (Building Name)
-                    widths[2] = 100               # Metro width (smaller since it's just "Seattle")
-                    widths[3] = 250               # Avail Website width (for building names)
-                    log_to_file(f"[Queue] Column config: Using Websites config (Metro=Seattle, Avail Website=Building Name)")
+                    # Websites table: Row counter, ID, Website (icon), Metro, Name, Avail Website, Last Scraped, Play, Edit
+                    labels[0] = "#"              # Column 1: Row counter
+                    labels[2] = "🔗"            # Column 3: Website link icon
+                    labels[3] = "Metro"          # Column 4: Metro (Seattle)
+                    labels[4] = "Name"           # Column 5: Building Name
+                    labels[5] = "Avail Website"  # Column 6: Availability Website
+                    labels[6] = "Last Scraped"   # Column 7: Last scraped timestamp
+                    labels[12] = "▶️"           # Column 13: Play button
+                    labels[13] = "✏️"           # Column 14: Edit button
+                    widths[0] = 35               # Row counter width
+                    widths[2] = 30               # Website icon width (just icon)
+                    widths[3] = 100              # Metro width
+                    widths[4] = 200              # Name width (increased since Website is smaller)
+                    widths[5] = 150              # Avail Website width (reduced)
+                    widths[6] = 130              # Last Scraped width
+                    widths[12] = 30              # Play button width
+                    widths[13] = 30              # Edit button width
+                    log_to_file(f"[Queue] Column config: Using Websites config with row counter")
                 # otherwise default
             except Exception as _maperr:
                 log_to_file(f"[Queue] Column mapping error: {_maperr}")
@@ -983,12 +1746,23 @@ class OldCompactHUD:
             except Exception as e:
                 print(f"Click error: {e}")
         
+        # Add scrollbar to initial tree
+        scrollbar = ttk.Scrollbar(self._tree_frame, orient="vertical", command=self._queue_tree.yview)
+        scrollbar.pack(side="right", fill="y")
+        self._queue_tree.configure(yscrollcommand=scrollbar.set)
+        self._queue_tree.pack(side="left", fill="both", expand=True)
+        
         self._queue_tree.bind("<Motion>", _on_tree_motion)
         self._queue_tree.bind("<Button-1>", _on_tree_click)
         self._queue_tree.bind("<Leave>", lambda e: _hide_tooltip())
 
         self._cell_tooltips = {}
         self._active_tooltip = None
+        
+        # Store event handlers for tree recreation
+        self._tree_motion_handler = _on_tree_motion
+        self._tree_click_handler = _on_tree_click
+        self._tree_leave_handler = lambda e: _hide_tooltip()
 
         def _hide_tooltip():
             try:
@@ -1012,26 +1786,8 @@ class OldCompactHUD:
             except Exception as _te:
                 log_to_file(f"[Queue] Tooltip error: {_te}")
 
-        def _on_tree_motion(event):
-            try:
-                row = self._queue_tree.identify_row(event.y)
-                col = self._queue_tree.identify_column(event.x)
-                if not row or not col:
-                    _hide_tooltip()
-                    return
-                key = (row, col)
-                if key in self._cell_tooltips:
-                    # Convert to screen coords
-                    x_root = self._queue_tree.winfo_rootx() + event.x
-                    y_root = self._queue_tree.winfo_rooty() + event.y
-                    _show_tooltip(self._cell_tooltips[key], x_root, y_root)
-                else:
-                    _hide_tooltip()
-            except Exception as _me:
-                log_to_file(f"[Queue] Motion handler error: {_me}")
-                _hide_tooltip()
-
-        self._queue_tree.bind('<Motion>', _on_tree_motion)
+        # Motion handler already defined above and bound
+        # (Duplicate removed to avoid conflicts)
         self._queue_tree.bind('<Leave>', lambda _e: _hide_tooltip())
 
         # Prevent crashes from clicking on tree
@@ -1069,9 +1825,12 @@ class OldCompactHUD:
                 
                 # Handle ID column click (column #1) - open Activity Window
                 if column == "#1":
+                    log_to_file(f"[Queue] ID column (#1) clicked!")
                     # Get job details
                     values = self._queue_tree.item(item, "values")
+                    log_to_file(f"[Queue] Row values: {values}")
                     if not values or len(values) == 0:
+                        log_to_file(f"[Queue] No values in row, returning")
                         return
                     # Extract job_id from "▶ 123" format
                     job_id_str = str(values[0]).replace("▶", "").strip()
@@ -1080,14 +1839,66 @@ class OldCompactHUD:
                     except:
                         job_id = job_id_str
                     table = self._current_table.get()
+                    log_to_file(f"[Queue] Current table: {table}, job_id: {job_id}")
                     
-                    # For Websites tab, check if Availability_Website exists
-                    if str(table).lower() in ('listing_websites', 'websites'):
+                    # For Parcel tab, launch parcel automation
+                    if str(table).lower() == 'parcel':
+                        log_to_file(f"[Parcel] Launching automation for parcel {job_id}")
                         try:
+                            # Select this row first
+                            self._queue_tree.selection_set(item)
+                            self._queue_tree.focus(item)
+                            
+                            # Get parcel data from the clicked row (fresh values)
+                            values = self._queue_tree.item(item, "values")
+                            log_to_file(f"[Parcel] Selected row values: {values}")
+                            
+                            parcel_data = {
+                                'id': job_id,
+                                'address': values[1] if len(values) > 1 else '',
+                                'metro_name': values[2] if len(values) > 2 else '',
+                                'parcel_link': self._parcel_links.get(item, '') if hasattr(self, '_parcel_links') else ''
+                            }
+                            
+                            # Gather all parcels from tree for batch processing
+                            all_parcels = []
+                            for tree_item in self._queue_tree.get_children():
+                                tree_values = self._queue_tree.item(tree_item, "values")
+                                if tree_values and len(tree_values) > 0:
+                                    tree_id_str = str(tree_values[0]).replace("▶", "").strip()
+                                    try:
+                                        tree_id = int(tree_id_str)
+                                    except:
+                                        tree_id = tree_id_str
+                                    
+                                    all_parcels.append({
+                                        'id': tree_id,
+                                        'address': tree_values[1] if len(tree_values) > 1 else '',
+                                        'metro_name': tree_values[2] if len(tree_values) > 2 else '',
+                                        'parcel_link': self._parcel_links.get(tree_item, '') if hasattr(self, '_parcel_links') else ''
+                                    })
+                            
+                            log_to_file(f"[Parcel] Parcel data: {parcel_data}, All parcels count: {len(all_parcels)}")
+                            
+                            # Import and launch automation with all parcels for batch processing
+                            from parcel_automation import launch_parcel_automation
+                            launch_parcel_automation(self._root, parcel_data, all_parcels)
+                            log_to_file(f"[Parcel] Launched automation for parcel ID {job_id}")
+                        except Exception as parcel_err:
+                            log_to_file(f"[Parcel] Failed to launch automation: {parcel_err}")
+                            import traceback
+                            traceback.print_exc()
+                        return
+                    
+                    # For Websites tab, open dedicated activity window
+                    if str(table).lower() in ('listing_websites', 'websites'):
+                        log_to_file(f"[Queue] Opening Websites Activity Window for ID {job_id}")
+                        try:
+                            # Check if Availability_Website exists
                             import mysql.connector
                             conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
                             cursor = conn.cursor()
-                            cursor.execute("SELECT availability_website FROM google_places WHERE id = %s", (job_id,))
+                            cursor.execute("SELECT availability_website, Website, Name FROM google_places WHERE id = %s", (job_id,))
                             result = cursor.fetchone()
                             cursor.close()
                             conn.close()
@@ -1097,9 +1908,91 @@ class OldCompactHUD:
                                 log_to_file(f"[Queue] Websites row {job_id} missing Availability_Website - opening edit dialog")
                                 self._show_edit_dialog(job_id, table)
                                 return
+                            
+                            availability_website = result[0]
+                            website_url = result[1] if len(result) > 1 else ''
+                            building_name = result[2] if len(result) > 2 else ''
+                            
+                            # Create Websites Activity Window (left 20%)
+                            screen_w = self._root.winfo_screenwidth()
+                            screen_h = self._root.winfo_screenheight()
+                            win_w = int(screen_w * 0.20)  # 20% width
+                            win_h = screen_h
+                            
+                            activity_win = tk.Toplevel(self._root)
+                            activity_win.title(f"Website Activity - ID {job_id}")
+                            activity_win.geometry(f"{win_w}x{win_h}+0+0")
+                            activity_win.configure(bg="#2C3E50")
+                            
+                            # Title with building name
+                            title_lbl = tk.Label(
+                                activity_win,
+                                text=f"🌐 {building_name or 'Website'}",
+                                font=("Segoe UI", 11, "bold"),
+                                bg="#34495E",
+                                fg="white",
+                                pady=8,
+                                wraplength=win_w-20
+                            )
+                            title_lbl.pack(fill="x")
+                            
+                            # Subtitle with ID
+                            subtitle_lbl = tk.Label(
+                                activity_win,
+                                text=f"ID: {job_id}",
+                                font=("Segoe UI", 9),
+                                bg="#2C3E50",
+                                fg="#BDC3C7",
+                                pady=4
+                            )
+                            subtitle_lbl.pack(fill="x")
+                            
+                            # Availability Website button
+                            avail_btn = tk.Button(
+                                activity_win,
+                                text=f"📋 Open: {availability_website[:40]}...",
+                                font=("Segoe UI", 9),
+                                bg="#3498DB",
+                                fg="white",
+                                relief="flat",
+                                cursor="hand2",
+                                command=lambda: webbrowser.open(availability_website)
+                            )
+                            avail_btn.pack(fill="x", padx=10, pady=5)
+                            
+                            # Activity log frame
+                            log_frame = tk.Frame(activity_win, bg="#2C3E50")
+                            log_frame.pack(fill="both", expand=True, padx=10, pady=10)
+                            
+                            log_scroll = tk.Scrollbar(log_frame)
+                            log_scroll.pack(side="right", fill="y")
+                            
+                            log_text = tk.Text(
+                                log_frame,
+                                font=("Consolas", 9),
+                                bg="#1C2833",
+                                fg="#ECF0F1",
+                                wrap="word",
+                                yscrollcommand=log_scroll.set
+                            )
+                            log_text.pack(side="left", fill="both", expand=True)
+                            log_scroll.config(command=log_text.yview)
+                            
+                            # Add initial log message
+                            import datetime
+                            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                            log_text.insert("end", f"[{timestamp}] Activity window opened for {building_name}\n")
+                            log_text.insert("end", f"[{timestamp}] Availability: {availability_website}\n")
+                            log_text.see("end")
+                            
+                            log_to_file(f"[Queue] Websites Activity Window opened for ID {job_id}")
+                            return
+                            
                         except Exception as check_err:
-                            log_to_file(f"[Queue] Failed to check Availability_Website: {check_err}")
-                            # Continue anyway if check fails
+                            log_to_file(f"[Queue] Failed to open Websites Activity Window: {check_err}")
+                            import traceback
+                            traceback.print_exc()
+                            return
                     
                     # Get screen dimensions and calculate 20% width and 100% height
                     screen_width = self._root.winfo_screenwidth()
@@ -1796,7 +2689,7 @@ class OldCompactHUD:
                             try:
                                 import requests
                                 import urllib.parse
-                                php_url = php_url("process_html_with_openai.php")
+                                php_api_url = php_url("process_html_with_openai.php")
                                 params = {
                                     "file": html_path,
                                     "model": "gpt-4o-mini",
@@ -1805,7 +2698,7 @@ class OldCompactHUD:
                                     "headless": "1"
                                 }
                                 encoded_params = urllib.parse.urlencode(params)
-                                full_url = f"{php_url}?{encoded_params}"
+                                full_url = f"{php_api_url}?{encoded_params}"
                                 status_win.after(0, lambda u=full_url: log_activity(f"  API: {u}", "#aaa"))
                                 status_win.after(0, lambda: log_activity(f"  Triggering PHP (headless)...", "#aaa"))
                                 resp = requests.get(full_url, timeout=60)
@@ -2567,8 +3460,8 @@ class OldCompactHUD:
                     def execute_step_3(idx, auto_continue=True):
                         """Step 3: Extract Data (download images) with progress bar"""
                         try:
-                            # Download to thumbnails folder
-                            thumbnails_dir = os.path.join(os.path.dirname(__file__), "Captures", "thumbnails")
+                            # Download to Networks thumbnails folder
+                            thumbnails_dir = os.path.join(os.path.dirname(__file__), "Captures", "thumbnails", "Networks")
                             os.makedirs(thumbnails_dir, exist_ok=True)
                             
                             status_win.after(0, lambda: set_status_path(idx, thumbnails_dir, open_path))
@@ -2576,18 +3469,26 @@ class OldCompactHUD:
                             status_win.after(0, lambda: progress_frame.pack(fill="x", padx=10, pady=5))
                             status_win.after(0, lambda: add_path_link(thumbnails_dir, "📁 Folder"))
                             
-                            # Call actual extract step (downloads images in background)
-                            self._start_job_step(job_id, table, "manual_match")
+                            # Call actual extract step (downloads images in background thread)
+                            import threading
+                            download_thread = threading.Thread(
+                                target=self._start_job_step,
+                                args=(job_id, table, "manual_match"),
+                                daemon=True
+                            )
+                            download_thread.start()
                             
                             # Estimate time and show progress
-                            estimated_time = 30  # seconds
+                            estimated_time = 60  # seconds
                             status_win.after(0, lambda: progress_label.config(text=f"Est: ~{estimated_time}s"))
                             
                             # Wait for images to be downloaded and count them
                             import time
-                            max_wait = 60  # Wait up to 60 seconds
+                            max_wait = 180  # Wait up to 3 minutes for all images
                             waited = 0
                             image_count = 0
+                            last_count = 0
+                            stable_count = 0
                             
                             while waited < max_wait:
                                 time.sleep(2)
@@ -2596,11 +3497,20 @@ class OldCompactHUD:
                                 # Check if thumbnails directory has images
                                 if os.path.exists(thumbnails_dir):
                                     current_count = len([f for f in os.listdir(thumbnails_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp'))])
+                                    
+                                    # Update progress
                                     if current_count > 0:
-                                        # Wait a bit more to make sure all images are downloaded
-                                        time.sleep(3)
-                                        image_count = len([f for f in os.listdir(thumbnails_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp'))])
-                                        break
+                                        status_win.after(0, lambda c=current_count: log_activity(f"📥 Downloading... {c} images so far", "#aaa"))
+                                    
+                                    # Check if count is stable (no new images in 6 seconds)
+                                    if current_count == last_count and current_count > 0:
+                                        stable_count += 2
+                                        if stable_count >= 6:
+                                            image_count = current_count
+                                            break
+                                    else:
+                                        stable_count = 0
+                                        last_count = current_count
                             
                             # If no images downloaded, skip Steps 3 and 4, go directly to Step 5
                             if image_count == 0:
@@ -2667,8 +3577,8 @@ class OldCompactHUD:
                             status_win.after(0, lambda: log_activity("Connecting to server...", "#aaa"))
                             status_win.after(0, lambda: progress_frame.pack(fill="x", padx=10, pady=5))
                             
-                            # Get images to upload from thumbnails folder
-                            thumbnails_dir = os.path.join(os.path.dirname(__file__), "Captures", "thumbnails")
+                            # Get images to upload from Networks thumbnails folder
+                            thumbnails_dir = os.path.join(os.path.dirname(__file__), "Captures", "thumbnails", "Networks")
                             
                             if not os.path.exists(thumbnails_dir):
                                 raise Exception("Thumbnails folder not found - run Step 3 first")
@@ -2812,8 +3722,9 @@ class OldCompactHUD:
                             
                             listings = []
                             try:
+                                import json as _json
                                 with open(json_path, "r", encoding="utf-8") as f:
-                                    listings = json.load(f)
+                                    listings = _json.load(f)
                             except Exception as _e:
                                 status_win.after(0, lambda: log_activity(f"❌ Failed to load JSON: {_e}", "#ff0000"))
                                 return
@@ -2916,8 +3827,30 @@ class OldCompactHUD:
                                         status_win.after(0, lambda: set_status_summary(idx, _sum_text, "#2ECC71"))
                                         return
 
+                                    def strip_unit(address):
+                                        """Remove unit numbers from address"""
+                                        if not address:
+                                            return address
+                                        import re
+                                        # Remove patterns like: #34, Unit 123, Apt A, Suite X, space+digits at end, etc.
+                                        patterns = [
+                                            r'\s+\d{1,4}(?:A|B|C|D)?,\s+',  # " 334, " or " 101, " before city
+                                            r'\s+-\s*\d+[A-Za-z]?,\s+',  # " - 00A, " before city
+                                            r'\s*#\d+.*$',  # #34 at end
+                                            r'\s*Unit\s+[A-Za-z0-9]+.*$',  # Unit 123
+                                            r'\s*Apt\.?\s+[A-Za-z0-9]+.*$',  # Apt A or Apt. A
+                                            r'\s*Suite\s+[A-Za-z0-9]+.*$',  # Suite X
+                                            r'\s*Ste\.?\s+[A-Za-z0-9]+.*$',  # Ste X
+                                            r',\s*Apt\.?\s+[A-Za-z0-9]+',  # , Apt 302
+                                            r'\s+[A-Za-z]?\d{2,4}[A-Za-z]?$',  # Space followed by 2-4 digits at very end (after comma removal)
+                                        ]
+                                        cleaned = address
+                                        for pattern in patterns:
+                                            cleaned = re.sub(pattern, ', ' if ', ' in pattern else '', cleaned, flags=re.IGNORECASE)
+                                        return cleaned.strip()
+                                    
                                     for listing in listings:
-                                        full_address = listing.get("full_address") or listing.get("address") or ""
+                                        full_address = strip_unit(listing.get("full_address") or listing.get("address") or "")
                                         price = to_int(listing.get("price"), 0)
                                         bedrooms = to_num_str(listing.get("bedrooms"))
                                         bathrooms = to_num_str(listing.get("bathrooms"), allow_decimal=True)
@@ -3212,8 +4145,959 @@ class OldCompactHUD:
                     run_steps(0)
                     return
                 
-                # Handle Edit button click (column #12 - ✏️ is at index 11)
+                # Handle Play button click (column #12 - ▶️) for Websites tab
                 if column == "#12":
+                    table = self._current_table.get()
+                    if str(table).lower() in ('listing_websites', 'websites'):
+                        values = self._queue_tree.item(item, "values")
+                        if values and len(values) > 1:
+                            # Extract job_id from column 1 (ID column with checkmark)
+                            job_id_str = str(values[1]).replace("▶", "").replace("✅", "").replace("❌", "").strip()
+                            try:
+                                job_id = int(job_id_str)
+                            except:
+                                job_id = job_id_str
+                            
+                            log_to_file(f"[Queue] Play button clicked for Website ID {job_id}")
+                            
+                            # Open Websites Activity Window
+                            try:
+                                import mysql.connector
+                                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                cursor = conn.cursor()
+                                cursor.execute("SELECT availability_website, Website, Name FROM google_places WHERE id = %s", (job_id,))
+                                result = cursor.fetchone()
+                                cursor.close()
+                                conn.close()
+                                
+                                if not result or not result[0] or str(result[0]).strip() == '':
+                                    log_to_file(f"[Queue] Website {job_id} missing Availability_Website")
+                                    self._queue_status_label.config(text="❌ No availability website URL found")
+                                    return
+                                
+                                availability_website = result[0]
+                                building_name = result[2] if len(result) > 2 else ''
+                                
+                                # Create Activity Window on left side (20% width)
+                                screen_w = self._root.winfo_screenwidth()
+                                screen_h = self._root.winfo_screenheight()
+                                win_w = int(screen_w * 0.20)
+                                
+                                activity_win = tk.Toplevel(self._root)
+                                activity_win.title(f"Website Activity - {building_name}")
+                                activity_win.geometry(f"{win_w}x{screen_h}+0+0")
+                                activity_win.configure(bg="#2C3E50")
+                                
+                                # Title
+                                title_lbl = tk.Label(activity_win, text=f"🌐 {building_name or 'Website'}", 
+                                                   font=("Segoe UI", 11, "bold"), bg="#34495E", fg="white", 
+                                                   pady=8, wraplength=win_w-20)
+                                title_lbl.pack(fill="x")
+                                
+                                # Subtitle
+                                subtitle_lbl = tk.Label(activity_win, text=f"ID: {job_id}", 
+                                                      font=("Segoe UI", 9), bg="#2C3E50", fg="#BDC3C7", pady=4)
+                                subtitle_lbl.pack(fill="x")
+                                
+                                # Activity log
+                                log_frame = tk.Frame(activity_win, bg="#2C3E50")
+                                log_frame.pack(fill="both", expand=True, padx=10, pady=10)
+                                
+                                log_text = tk.Text(log_frame, font=("Consolas", 9), bg="#1C2833", 
+                                                 fg="#ECF0F1", wrap="word", relief="flat")
+                                log_text.pack(fill="both", expand=True)
+                                
+                                # Add initial log entry
+                                from datetime import datetime
+                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                log_text.insert("end", f"[{timestamp}] Activity window opened\n")
+                                log_text.insert("end", f"[{timestamp}] Opening website in browser...\n")
+                                log_text.config(state="disabled")
+                                
+                                # Function to open website in browser at right 80% with 75% zoom
+                                def open_website_browser():
+                                    try:
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] Launching Chrome browser...\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        from selenium import webdriver
+                                        from selenium.webdriver.chrome.options import Options
+                                        import time
+                                        import os
+                                        import json
+                                        from pathlib import Path
+                                        from bs4 import BeautifulSoup
+                                        
+                                        chrome_options = Options()
+                                        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+                                        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+                                        chrome_options.add_experimental_option('useAutomationExtension', False)
+                                        
+                                        driver = webdriver.Chrome(options=chrome_options)
+                                        
+                                        # Position browser in right 80% of screen
+                                        browser_x = win_w  # Start after activity window (20% width)
+                                        browser_w = int(screen_w * 0.80)  # 80% width
+                                        driver.set_window_position(browser_x, 0)
+                                        driver.set_window_size(browser_w, screen_h)
+                                        
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] Loading URL: {availability_website}\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        # Navigate to URL
+                                        driver.get(availability_website)
+                                        
+                                        # Set zoom to 75%
+                                        driver.execute_script("document.body.style.zoom='75%'")
+                                        
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] Browser opened at 75% zoom\n")
+                                        log_text.insert("end", f"[{timestamp}] Position: Right 80% of screen\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        # Wait for page to load
+                                        time.sleep(3)
+                                        
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] Page loaded, capturing HTML...\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        # Get page source
+                                        html_content = driver.page_source
+                                        
+                                        # Create Websites folder structure
+                                        date_str = datetime.now().strftime("%Y-%m-%d")
+                                        captures_dir = Path("Captures") / date_str / "Websites"
+                                        captures_dir.mkdir(parents=True, exist_ok=True)
+                                        
+                                        # Save HTML file
+                                        html_filename = f"website_{job_id}.html"
+                                        html_path = captures_dir / html_filename
+                                        html_path.write_text(html_content, encoding="utf-8")
+                                        
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] ✓ HTML saved: {html_filename}\n")
+                                        
+                                        # Add clickable link to folder
+                                        folder_link = str(captures_dir.absolute()).replace("\\", "/")
+                                        log_text.insert("end", f"[{timestamp}] 📁 Folder: ", "normal")
+                                        log_text.insert("end", f"{folder_link}\n", "link")
+                                        log_text.tag_config("link", foreground="#3498DB", underline=True)
+                                        log_text.tag_bind("link", "<Button-1>", lambda e: os.startfile(str(captures_dir.absolute())))
+                                        log_text.tag_bind("link", "<Enter>", lambda e: log_text.config(cursor="hand2"))
+                                        log_text.tag_bind("link", "<Leave>", lambda e: log_text.config(cursor=""))
+                                        
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        # Extract listings from HTML
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] Extracting listings...\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        soup = BeautifulSoup(html_content, 'html.parser')
+                                        listings = []
+                                        
+                                        # Try multiple listing patterns (adjust selectors based on website structure)
+                                        # Pattern 1: Doorway/Knockrentals floorplan cards
+                                        cards = soup.select("div.dw-floorplan-card, div[class*='floorplan'], div[class*='unit-card']")
+                                        
+                                        if not cards:
+                                            # Pattern 2: Common listing cards
+                                            cards = soup.select("div.listing-card, div.property-card, article.listing, div[class*='listing'], div[class*='unit']")
+                                        
+                                        if not cards:
+                                            # Pattern 3: Table rows
+                                            cards = soup.select("tr.listing-row, tbody tr")
+                                        
+                                        if not cards:
+                                            # Pattern 4: List items
+                                            cards = soup.select("li.listing, li[class*='property']")
+                                        
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] Found {len(cards)} potential listings\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        import re
+                                        for idx, card in enumerate(cards[:50], 1):  # Limit to 50 listings
+                                            listing = {
+                                                "result_number": idx,
+                                                "google_places_id": job_id,
+                                                "source_url": availability_website,
+                                                "html_filename": html_filename,
+                                                "title": None,
+                                                "unit_name": None,
+                                                "bedrooms": None,
+                                                "bathrooms": None,
+                                                "price": None,
+                                                "sqft": None,
+                                                "available_date": None,
+                                                "address": None,
+                                                "detail_page_link": None,
+                                                "detail_page_text": None,
+                                                "apply_link": None,
+                                                "tour_link": None,
+                                                "raw_html": str(card)[:1000]  # First 1000 chars for debugging
+                                            }
+                                            
+                                            # Get all text for regex parsing
+                                            text = card.get_text(" ", strip=True)
+                                            
+                                            # Extract title/floorplan name
+                                            title_elem = card.select_one("h1, h2, h3, h4, .title, [class*='title'], [class*='name']")
+                                            if title_elem:
+                                                listing["title"] = title_elem.get_text(strip=True)
+                                            
+                                            # Extract unit name/number
+                                            unit_elem = card.select_one("[class*='unit']")
+                                            if unit_elem:
+                                                unit_text = unit_elem.get_text(strip=True)
+                                                if "unit" in unit_text.lower():
+                                                    listing["unit_name"] = unit_text
+                                            
+                                            # Extract price (look for $ followed by numbers)
+                                            price_patterns = [
+                                                r'\$[\d,]+\.?\d*\s*/\s*mo',  # $3,995.00/mo
+                                                r'\$[\d,]+\.?\d*',           # $3995 or $3,995.00
+                                                r'[\d,]+\s*/\s*month',       # 3995/month
+                                            ]
+                                            for pattern in price_patterns:
+                                                price_match = re.search(pattern, text, re.I)
+                                                if price_match:
+                                                    listing["price"] = price_match.group(0)
+                                                    break
+                                            
+                                            # Extract bedrooms (more patterns)
+                                            bed_patterns = [
+                                                r'(\d+)\s*Bed(?:room)?s?\s*(\d+)\s*Bath',  # "2 Bed 2 Bath"
+                                                r'(\d+)\s*bd',                              # "2 bd"
+                                                r'(\d+)\s*BR',                              # "2 BR"
+                                                r'(\d+)\s*bed(?:room)?s?',                 # "2 bedrooms"
+                                                r'Studio',                                  # "Studio"
+                                            ]
+                                            for pattern in bed_patterns:
+                                                bed_match = re.search(pattern, text, re.I)
+                                                if bed_match:
+                                                    if "studio" in pattern.lower():
+                                                        listing["bedrooms"] = "Studio"
+                                                    else:
+                                                        listing["bedrooms"] = bed_match.group(1)
+                                                    break
+                                            
+                                            # Extract bathrooms
+                                            bath_patterns = [
+                                                r'(\d+\.?\d*)\s*Bath(?:room)?s?',  # "2 Baths" or "1.5 Bath"
+                                                r'(\d+\.?\d*)\s*ba',                # "2 ba"
+                                            ]
+                                            for pattern in bath_patterns:
+                                                bath_match = re.search(pattern, text, re.I)
+                                                if bath_match:
+                                                    listing["bathrooms"] = bath_match.group(1)
+                                                    break
+                                            
+                                            # Extract square footage
+                                            sqft_patterns = [
+                                                r'(\d{1,4})\s*Sq[/.]?Ft',   # "1054 Sq/Ft" or "1054 Sq.Ft"
+                                                r'(\d{1,4})\s*sq\.?\s*ft',  # "1054 sq ft"
+                                                r'(\d{1,4})\s*sf',          # "1054 sf"
+                                            ]
+                                            for pattern in sqft_patterns:
+                                                sqft_match = re.search(pattern, text, re.I)
+                                                if sqft_match:
+                                                    listing["sqft"] = int(sqft_match.group(1))
+                                                    break
+                                            
+                                            # Extract availability date
+                                            avail_patterns = [
+                                                r'Available\s+(\d{1,2}/\d{1,2}/\d{4})',     # "Available 11/23/2025"
+                                                r'Available\s+(\d{1,2}-\d{1,2}-\d{4})',     # "Available 11-23-2025"
+                                                r'Move[- ]in[:\s]+(\d{1,2}/\d{1,2}/\d{4})', # "Move-in: 11/23/2025"
+                                            ]
+                                            for pattern in avail_patterns:
+                                                avail_match = re.search(pattern, text, re.I)
+                                                if avail_match:
+                                                    listing["available_date"] = avail_match.group(1)
+                                                    break
+                                            
+                                            # Extract listing detail page link (from thumbnail/image or main card link)
+                                            detail_link = None
+                                            # Try image/thumbnail link first
+                                            img_link = card.select_one("a[href] img")
+                                            if img_link:
+                                                parent_link = img_link.find_parent("a")
+                                                if parent_link and parent_link.get('href'):
+                                                    detail_link = parent_link.get('href')
+                                            
+                                            # Try main card link
+                                            if not detail_link:
+                                                main_link = card.select_one("a[href]:not([href*='apply']):not([href*='tour']):not([href*='mailto']):not([href*='tel'])")
+                                                if main_link:
+                                                    detail_link = main_link.get('href')
+                                            
+                                            # Convert to absolute URL
+                                            if detail_link:
+                                                if detail_link.startswith('/'):
+                                                    from urllib.parse import urlparse
+                                                    parsed_url = urlparse(availability_website)
+                                                    detail_link = f"{parsed_url.scheme}://{parsed_url.netloc}{detail_link}"
+                                                elif not detail_link.startswith('http'):
+                                                    from urllib.parse import urljoin
+                                                    detail_link = urljoin(availability_website, detail_link)
+                                                listing["detail_page_link"] = detail_link
+                                            
+                                            # Extract all links from the listing card
+                                            all_links = []
+                                            for link in card.select("a[href]"):
+                                                href = link.get('href', '').strip()
+                                                if href and not href.startswith('#'):  # Skip empty and anchor links
+                                                    # Make relative URLs absolute
+                                                    if href.startswith('/'):
+                                                        from urllib.parse import urlparse
+                                                        parsed_url = urlparse(availability_website)
+                                                        href = f"{parsed_url.scheme}://{parsed_url.netloc}{href}"
+                                                    elif not href.startswith('http'):
+                                                        from urllib.parse import urljoin
+                                                        href = urljoin(availability_website, href)
+                                                    
+                                                    link_text = link.get_text(strip=True)
+                                                    link_info = {
+                                                        "url": href,
+                                                        "text": link_text if link_text else "(no text)"
+                                                    }
+                                                    all_links.append(link_info)
+                                            
+                                            listing["all_links"] = all_links
+                                            
+                                            # If detail page link exists, open it and extract detailed information
+                                            if listing["detail_page_link"]:
+                                                try:
+                                                    log_text.config(state="normal")
+                                                    timestamp = datetime.now().strftime("%H:%M:%S")
+                                                    log_text.insert("end", f"[{timestamp}] Opening detail page for listing {idx}...\n")
+                                                    log_text.see("end")
+                                                    log_text.config(state="disabled")
+                                                    activity_win.update()
+                                                    
+                                                    # Navigate to detail page
+                                                    driver.get(listing["detail_page_link"])
+                                                    time.sleep(2)  # Wait for page to load
+                                                    
+                                                    # Capture and parse detail page
+                                                    detail_html = driver.page_source
+                                                    detail_soup = BeautifulSoup(detail_html, 'html.parser')
+                                                    
+                                                    # Extract full body text
+                                                    body_div = detail_soup.select_one("body")
+                                                    if body_div:
+                                                        listing["detail_page_text"] = body_div.get_text(" ", strip=True)
+                                                    
+                                                    # Extract unit number from title/heading
+                                                    unit_heading = detail_soup.select_one("h1, h2.unit-title, [class*='unit-number']")
+                                                    if unit_heading:
+                                                        unit_text = unit_heading.get_text(strip=True)
+                                                        if "unit" in unit_text.lower():
+                                                            listing["unit_number"] = unit_text
+                                                    
+                                                    # Extract amenities
+                                                    amenities = []
+                                                    amenity_section = detail_soup.select("ul.amenities li, div.amenity, [class*='amenities'] li")
+                                                    for amenity in amenity_section:
+                                                        amenities.append(amenity.get_text(strip=True))
+                                                    listing["amenities"] = amenities if amenities else None
+                                                    
+                                                    # Extract pet policy
+                                                    pet_policy = {}
+                                                    pet_section = detail_soup.find(string=re.compile("Pet Policy", re.I))
+                                                    if pet_section:
+                                                        pet_parent = pet_section.find_parent()
+                                                        if pet_parent:
+                                                            pet_text = pet_parent.get_text(" ", strip=True)
+                                                            listing["pet_policy"] = pet_text
+                                                    
+                                                    # Extract walk score
+                                                    walk_score = detail_soup.find(string=re.compile("Walk Score", re.I))
+                                                    if walk_score:
+                                                        score_parent = walk_score.find_parent()
+                                                        if score_parent:
+                                                            score_numbers = re.findall(r'(\d+)\s*Walk Score', score_parent.get_text())
+                                                            if score_numbers:
+                                                                listing["walk_score"] = score_numbers[0]
+                                                    
+                                                    # Extract transit score
+                                                    transit = detail_soup.find(string=re.compile("Transit Score", re.I))
+                                                    if transit:
+                                                        transit_parent = transit.find_parent()
+                                                        if transit_parent:
+                                                            transit_numbers = re.findall(r'(\d+)\s*Transit', transit_parent.get_text())
+                                                            if transit_numbers:
+                                                                listing["transit_score"] = transit_numbers[0]
+                                                    
+                                                    # Extract bike score
+                                                    bike = detail_soup.find(string=re.compile("Bike Score", re.I))
+                                                    if bike:
+                                                        bike_parent = bike.find_parent()
+                                                        if bike_parent:
+                                                            bike_numbers = re.findall(r'(\d+)\s*Bike', bike_parent.get_text())
+                                                            if bike_numbers:
+                                                                listing["bike_score"] = bike_numbers[0]
+                                                    
+                                                    # Extract fees/deposits
+                                                    fees = []
+                                                    fee_section = detail_soup.find(string=re.compile("Fees|Deposit", re.I))
+                                                    if fee_section:
+                                                        fee_parent = fee_section.find_parent()
+                                                        if fee_parent:
+                                                            fee_items = fee_parent.find_all(['li', 'p', 'div'])
+                                                            for item in fee_items:
+                                                                fee_text = item.get_text(strip=True)
+                                                                if '$' in fee_text:
+                                                                    fees.append(fee_text)
+                                                    listing["fees"] = fees if fees else None
+                                                    
+                                                    # Extract address
+                                                    address_elem = detail_soup.select_one("[class*='address'], address")
+                                                    if address_elem:
+                                                        listing["full_address"] = address_elem.get_text(strip=True)
+                                                    
+                                                    # Extract contact info
+                                                    email_elem = detail_soup.select_one("a[href^='mailto:']")
+                                                    if email_elem:
+                                                        listing["email"] = email_elem.get('href').replace('mailto:', '')
+                                                    
+                                                    phone_elem = detail_soup.select_one("a[href^='tel:'], [class*='phone']")
+                                                    if phone_elem:
+                                                        listing["phone"] = phone_elem.get_text(strip=True)
+                                                    
+                                                    # Extract office hours
+                                                    hours_section = detail_soup.find(string=re.compile("Office Hours", re.I))
+                                                    if hours_section:
+                                                        hours_parent = hours_section.find_parent()
+                                                        if hours_parent:
+                                                            listing["office_hours"] = hours_parent.get_text(" ", strip=True)
+                                                    
+                                                    # Extract image URLs
+                                                    images = []
+                                                    img_tags = detail_soup.select("img[src*='photo'], img[src*='image'], div.gallery img")
+                                                    for img in img_tags[:20]:  # Limit to 20 images
+                                                        src = img.get('src')
+                                                        if src and 'http' in src:
+                                                            images.append(src)
+                                                    listing["image_urls"] = images if images else None
+                                                    
+                                                    log_text.config(state="normal")
+                                                    timestamp = datetime.now().strftime("%H:%M:%S")
+                                                    log_text.insert("end", f"[{timestamp}] ✓ Extracted {len([k for k,v in listing.items() if v])} fields from detail page\n")
+                                                    log_text.see("end")
+                                                    log_text.config(state="disabled")
+                                                    activity_win.update()
+                                                except Exception as detail_err:
+                                                    log_text.config(state="normal")
+                                                    timestamp = datetime.now().strftime("%H:%M:%S")
+                                                    log_text.insert("end", f"[{timestamp}] ⚠ Could not capture detail page: {str(detail_err)[:50]}\n")
+                                                    log_text.see("end")
+                                                    log_text.config(state="disabled")
+                                                    activity_win.update()
+                                                    listing["detail_page_text"] = None
+                                            
+                                            # Also extract specific common links
+                                            apply_link = card.select_one("a[href*='apply'], button[class*='apply']")
+                                            if apply_link and apply_link.get('href'):
+                                                href = apply_link.get('href')
+                                                if href.startswith('/'):
+                                                    from urllib.parse import urlparse
+                                                    parsed_url = urlparse(availability_website)
+                                                    href = f"{parsed_url.scheme}://{parsed_url.netloc}{href}"
+                                                listing["apply_link"] = href
+                                            
+                                            tour_link = card.select_one("a[href*='tour'], button[class*='tour']")
+                                            if tour_link and tour_link.get('href'):
+                                                href = tour_link.get('href')
+                                                if href.startswith('/'):
+                                                    from urllib.parse import urlparse
+                                                    parsed_url = urlparse(availability_website)
+                                                    href = f"{parsed_url.scheme}://{parsed_url.netloc}{href}"
+                                                listing["tour_link"] = href
+                                            
+                                            listings.append(listing)
+                                        
+                                        # Save JSON file
+                                        json_filename = f"website_{job_id}.json"
+                                        json_path = captures_dir / json_filename
+                                        json_path.write_text(json.dumps(listings, indent=4), encoding="utf-8")
+                                        
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] ✓ Extracted {len(listings)} listings\n")
+                                        log_text.insert("end", f"[{timestamp}] ✓ JSON saved: {json_filename}\n")
+                                        
+                                        # Add clickable link to folder
+                                        folder_link = str(captures_dir.absolute()).replace("\\", "/")
+                                        log_text.insert("end", f"[{timestamp}] 📁 Open Folder: ", "normal")
+                                        log_text.insert("end", f"{folder_link}\n", "link2")
+                                        log_text.tag_config("link2", foreground="#2ECC71", underline=True, font=("Consolas", 9, "bold"))
+                                        log_text.tag_bind("link2", "<Button-1>", lambda e: os.startfile(str(captures_dir.absolute())))
+                                        log_text.tag_bind("link2", "<Enter>", lambda e: log_text.config(cursor="hand2"))
+                                        log_text.tag_bind("link2", "<Leave>", lambda e: log_text.config(cursor=""))
+                                        
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        # Insert/Update into apartment_listings database
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] Inserting into database...\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        import mysql.connector
+                                        db_conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                        db_cursor = db_conn.cursor()
+                                        
+                                        # Get google_addresses_id from google_places
+                                        db_cursor.execute("SELECT google_addresses_id FROM google_places WHERE id=%s", (job_id,))
+                                        google_addresses_result = db_cursor.fetchone()
+                                        google_addresses_id = google_addresses_result[0] if google_addresses_result else None
+                                        
+                                        # Store google_places update data
+                                        google_places_data = {}
+                                        
+                                        # Update google_places with building-wide data (from first listing)
+                                        if listings and len(listings) > 0:
+                                            first_listing = listings[0]
+                                            
+                                            # Building-wide fields
+                                            building_amenities = first_listing.get('amenities', [])
+                                            building_email = first_listing.get('email', '')
+                                            building_phone = first_listing.get('phone', '')
+                                            building_address = first_listing.get('full_address', '')
+                                            building_hours = first_listing.get('office_hours', '')
+                                            building_images = first_listing.get('image_urls', [])
+                                            
+                                            # Convert amenities array to JSON string
+                                            amenities_json = json.dumps(building_amenities) if building_amenities else None
+                                            
+                                            # Get first image for featured image
+                                            featured_img = building_images[0] if building_images else None
+                                            
+                                            # Update google_places
+                                            update_fields = []
+                                            update_values = []
+                                            
+                                            if amenities_json:
+                                                update_fields.append("Amenities=%s")
+                                                update_values.append(amenities_json)
+                                                google_places_data['Amenities'] = building_amenities
+                                            if building_email:
+                                                update_fields.append("Email=%s")
+                                                update_values.append(building_email)
+                                                google_places_data['Email'] = building_email
+                                            if building_phone:
+                                                update_fields.append("Phone=%s")
+                                                update_values.append(building_phone)
+                                                google_places_data['Phone'] = building_phone
+                                            if building_address:
+                                                update_fields.append("Fulladdress=%s")
+                                                update_values.append(building_address)
+                                                google_places_data['Fulladdress'] = building_address
+                                            if building_hours:
+                                                update_fields.append("Opening_Hours=%s")
+                                                update_values.append(building_hours)
+                                                google_places_data['Opening_Hours'] = building_hours
+                                            if featured_img:
+                                                update_fields.append("Featured_Image=%s")
+                                                update_values.append(featured_img)
+                                                google_places_data['Featured_Image'] = featured_img
+                                            
+                                            if update_fields:
+                                                update_values.append(job_id)
+                                                db_cursor.execute(
+                                                    f"UPDATE google_places SET {', '.join(update_fields)} WHERE id=%s",
+                                                    tuple(update_values)
+                                                )
+                                                google_places_data['google_places_id'] = job_id
+                                                google_places_data['amenity_count'] = len(building_amenities)
+                                                google_places_data['image_count'] = len(building_images)
+                                                
+                                                log_text.config(state="normal")
+                                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                                log_text.insert("end", f"[{timestamp}] ✓ Updated google_places with building-wide data\n")
+                                                log_text.see("end")
+                                                log_text.config(state="disabled")
+                                                activity_win.update()
+                                        
+                                        inserted = 0
+                                        updated = 0
+                                        inserted_details = []
+                                        updated_details = []
+                                        
+                                        for listing_data in listings:
+                                            try:
+                                                # Extract all fields from JSON
+                                                title = listing_data.get('title', '')
+                                                unit_name = listing_data.get('unit_name', '')
+                                                unit_number = listing_data.get('unit_number', '')
+                                                bedrooms = listing_data.get('bedrooms', '')
+                                                bathrooms = listing_data.get('bathrooms', '')
+                                                price_str = listing_data.get('price', '')
+                                                sqft = listing_data.get('sqft', None)
+                                                available_date = listing_data.get('available_date', '')
+                                                detail_link = listing_data.get('detail_page_link', '')
+                                                detail_text = listing_data.get('detail_page_text', '')
+                                                apply_link = listing_data.get('apply_link', '')
+                                                pet_policy = listing_data.get('pet_policy', '')
+                                                walk_score = listing_data.get('walk_score', '')
+                                                transit_score = listing_data.get('transit_score', '')
+                                                bike_score = listing_data.get('bike_score', '')
+                                                fees = listing_data.get('fees', [])
+                                                image_urls = listing_data.get('image_urls', [])
+                                                full_address = listing_data.get('full_address', '')
+                                                email = listing_data.get('email', '')
+                                                phone = listing_data.get('phone', '')
+                                                
+                                                # Parse price (remove $ and /mo)
+                                                price_num = None
+                                                if price_str:
+                                                    price_clean = re.sub(r'[^\d.]', '', price_str)
+                                                    try:
+                                                        price_num = float(price_clean)
+                                                    except:
+                                                        pass
+                                                
+                                                # Build other_details JSON with scores
+                                                other_details_dict = {}
+                                                if walk_score:
+                                                    other_details_dict['walk_score'] = walk_score
+                                                if transit_score:
+                                                    other_details_dict['transit_score'] = transit_score
+                                                if bike_score:
+                                                    other_details_dict['bike_score'] = bike_score
+                                                if pet_policy:
+                                                    other_details_dict['pet_policy'] = pet_policy
+                                                if fees:
+                                                    other_details_dict['fees'] = fees
+                                                
+                                                other_details_json = json.dumps(other_details_dict) if other_details_dict else None
+                                                
+                                                # Convert image_urls array to comma-separated string
+                                                img_urls_str = ','.join(image_urls) if image_urls else None
+                                                
+                                                # Parse deposit from fees
+                                                deposit_amount = None
+                                                if fees:
+                                                    for fee in fees:
+                                                        if 'deposit' in fee.lower():
+                                                            deposit_match = re.search(r'\$([\d,]+\.?\d*)', fee)
+                                                            if deposit_match:
+                                                                deposit_amount = deposit_match.group(1).replace(',', '')
+                                                
+                                                # Check if listing exists by detail_page_link
+                                                db_cursor.execute(
+                                                    "SELECT id, price FROM apartment_listings WHERE listing_website = %s AND google_places_id = %s",
+                                                    (detail_link, job_id)
+                                                )
+                                                existing = db_cursor.fetchone()
+                                                
+                                                if existing:
+                                                    # Update existing
+                                                    existing_id, old_price = existing
+                                                    
+                                                    # Check for price change
+                                                    if price_num and old_price and float(old_price) != price_num:
+                                                        change_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                                        db_cursor.execute(
+                                                            """
+                                                            INSERT INTO apartment_listings_price_changes
+                                                            (apartment_listings_id, new_price, time)
+                                                            VALUES (%s, %s, %s)
+                                                            """,
+                                                            (existing_id, price_num, change_time)
+                                                        )
+                                                    
+                                                    db_cursor.execute(
+                                                        """
+                                                        UPDATE apartment_listings
+                                                        SET unit_number=%s, title=%s, bedrooms=%s, bathrooms=%s, sqft=%s, price=%s,
+                                                            description=%s, available_date=%s, active='yes',
+                                                            other_details=%s, img_urls=%s, full_address=%s,
+                                                            email_contact=%s, phone_contact=%s, apply_now_link=%s,
+                                                            Deposit_Amount=%s, google_addresses_id=%s, time_updated=NOW()
+                                                        WHERE id=%s
+                                                        """,
+                                                        (unit_number, title or unit_name, bedrooms, bathrooms, sqft, price_num,
+                                                         detail_text, available_date, other_details_json, img_urls_str,
+                                                         full_address, email, phone, apply_link, deposit_amount, google_addresses_id, existing_id)
+                                                    )
+                                                    updated += 1
+                                                    
+                                                    # Store details
+                                                    updated_details.append({
+                                                        'id': existing_id,
+                                                        'unit_number': unit_number,
+                                                        'title': title or unit_name,
+                                                        'bedrooms': bedrooms,
+                                                        'bathrooms': bathrooms,
+                                                        'sqft': sqft,
+                                                        'price': price_num,
+                                                        'available_date': available_date,
+                                                        'description': detail_text[:200] if detail_text else None,
+                                                        'walk_score': walk_score,
+                                                        'transit_score': transit_score,
+                                                        'bike_score': bike_score,
+                                                        'pet_policy': pet_policy[:100] if pet_policy else None,
+                                                        'deposit': deposit_amount,
+                                                        'email': email,
+                                                        'phone': phone,
+                                                        'image_count': len(image_urls),
+                                                        'price_changed': float(old_price) != price_num if (price_num and old_price) else False
+                                                    })
+                                                else:
+                                                    # Insert new
+                                                    db_cursor.execute(
+                                                        """
+                                                        INSERT INTO apartment_listings
+                                                        (google_places_id, google_addresses_id, active, unit_number, title, bedrooms, bathrooms, sqft, price,
+                                                         available_date, description, Building_Name, listing_website,
+                                                         other_details, img_urls, full_address, email_contact, phone_contact,
+                                                         apply_now_link, Deposit_Amount, time_created, time_updated)
+                                                        VALUES (%s, %s, 'yes', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                                                %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                                                        """,
+                                                        (job_id, google_addresses_id, unit_number, title or unit_name, bedrooms, bathrooms, sqft, price_num,
+                                                         available_date, detail_text, title or unit_name, detail_link,
+                                                         other_details_json, img_urls_str, full_address, email, phone,
+                                                         apply_link, deposit_amount)
+                                                    )
+                                                    new_id = db_cursor.lastrowid
+                                                    inserted += 1
+                                                    
+                                                    # Store details
+                                                    inserted_details.append({
+                                                        'id': new_id,
+                                                        'google_places_id': job_id,
+                                                        'google_addresses_id': google_addresses_id,
+                                                        'active': 'yes',
+                                                        'unit_number': unit_number,
+                                                        'title': title or unit_name,
+                                                        'bedrooms': bedrooms,
+                                                        'bathrooms': bathrooms,
+                                                        'sqft': sqft,
+                                                        'price': price_num,
+                                                        'available_date': available_date,
+                                                        'description': detail_text[:200] if detail_text else None,
+                                                        'Building_Name': title or unit_name,
+                                                        'listing_website': detail_link,
+                                                        'walk_score': walk_score,
+                                                        'transit_score': transit_score,
+                                                        'bike_score': bike_score,
+                                                        'pet_policy': pet_policy[:100] if pet_policy else None,
+                                                        'deposit': deposit_amount,
+                                                        'email': email,
+                                                        'phone': phone,
+                                                        'image_count': len(image_urls)
+                                                    })
+                                            
+                                            except Exception as db_err:
+                                                log_text.config(state="normal")
+                                                timestamp = datetime.now().strftime("%H:%M:%S")
+                                                log_text.insert("end", f"[{timestamp}] ⚠ DB error: {str(db_err)[:50]}\n")
+                                                log_text.see("end")
+                                                log_text.config(state="disabled")
+                                                activity_win.update()
+                                        
+                                        # Update google_places with last scraped timestamp
+                                        db_cursor.execute(
+                                            "UPDATE google_places SET availability_website_last_scraped = NOW() WHERE id = %s",
+                                            (job_id,)
+                                        )
+                                        
+                                        db_conn.commit()
+                                        db_cursor.close()
+                                        db_conn.close()
+                                        
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] ✓ Database: {inserted} inserted, {updated} updated\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        activity_win.update()
+                                        
+                                        # Close browser
+                                        try:
+                                            driver.quit()
+                                            log_text.config(state="normal")
+                                            timestamp = datetime.now().strftime("%H:%M:%S")
+                                            log_text.insert("end", f"[{timestamp}] ✓ Browser closed\n")
+                                            log_text.see("end")
+                                            log_text.config(state="disabled")
+                                            activity_win.update()
+                                        except:
+                                            pass
+                                        
+                                        # Show inserted listings in a new window
+                                        results_win = tk.Toplevel(activity_win)
+                                        results_win.title(f"Inserted Listings - {building_name}")
+                                        results_win.geometry("600x500")
+                                        results_win.configure(bg="#34495E")
+                                        
+                                        # Title
+                                        title_frame = tk.Frame(results_win, bg="#2C3E50")
+                                        title_frame.pack(fill="x", padx=10, pady=10)
+                                        tk.Label(title_frame, text=f"📊 Inserted Listings", 
+                                               font=("Segoe UI", 12, "bold"), bg="#2C3E50", fg="white").pack()
+                                        tk.Label(title_frame, text=f"{inserted} new • {updated} updated", 
+                                               font=("Segoe UI", 9), bg="#2C3E50", fg="#BDC3C7").pack()
+                                        
+                                        # Scrollable text area
+                                        text_frame = tk.Frame(results_win, bg="#34495E")
+                                        text_frame.pack(fill="both", expand=True, padx=10, pady=10)
+                                        
+                                        scrollbar = tk.Scrollbar(text_frame)
+                                        scrollbar.pack(side="right", fill="y")
+                                        
+                                        results_text = tk.Text(text_frame, font=("Consolas", 9), bg="#1C2833", 
+                                                             fg="#ECF0F1", wrap="word", relief="flat",
+                                                             yscrollcommand=scrollbar.set)
+                                        results_text.pack(side="left", fill="both", expand=True)
+                                        scrollbar.config(command=results_text.yview)
+                                        
+                                        # Display google_places update
+                                        if google_places_data:
+                                            results_text.insert("end", "\n🏢 GOOGLE_PLACES UPDATE (Building-Wide Data)\n", "section")
+                                            results_text.insert("end", "="*60 + "\n\n", "section")
+                                            results_text.insert("end", f"Google Places ID: ", "label")
+                                            results_text.insert("end", f"{google_places_data.get('google_places_id', 'N/A')}\n", "id_value")
+                                            results_text.insert("end", "-"*60 + "\n", "separator")
+                                            
+                                            for key, value in google_places_data.items():
+                                                if key in ('google_places_id', 'amenity_count', 'image_count'):
+                                                    continue
+                                                results_text.insert("end", f"{key}: ", "label")
+                                                if isinstance(value, list):
+                                                    results_text.insert("end", f"{len(value)} items - {', '.join(value[:3])}{'...' if len(value) > 3 else ''}\n", "value")
+                                                elif len(str(value)) > 100:
+                                                    results_text.insert("end", f"{str(value)[:100]}...\n", "value")
+                                                else:
+                                                    results_text.insert("end", f"{value}\n", "value")
+                                            
+                                            results_text.insert("end", f"\nTotal Amenities: ", "label")
+                                            results_text.insert("end", f"{google_places_data.get('amenity_count', 0)}\n", "value")
+                                            results_text.insert("end", f"Total Images: ", "label")
+                                            results_text.insert("end", f"{google_places_data.get('image_count', 0)}\n\n", "value")
+                                        
+                                        # Display inserted listings
+                                        if inserted_details:
+                                            results_text.insert("end", "\n🆕 INSERTED LISTINGS\n", "section")
+                                            results_text.insert("end", "="*60 + "\n\n", "section")
+                                            
+                                            for detail in inserted_details:
+                                                results_text.insert("end", f"Database ID: ", "label")
+                                                results_text.insert("end", f"{detail['id']}\n", "id_value")
+                                                results_text.insert("end", "-"*60 + "\n", "separator")
+                                                
+                                                for key, value in detail.items():
+                                                    if key == 'id':
+                                                        continue
+                                                    results_text.insert("end", f"{key}: ", "label")
+                                                    results_text.insert("end", f"{value}\n", "value")
+                                                
+                                                results_text.insert("end", "\n", "value")
+                                        
+                                        # Display updated listings
+                                        if updated_details:
+                                            results_text.insert("end", "\n🔄 UPDATED LISTINGS\n", "section")
+                                            results_text.insert("end", "="*60 + "\n\n", "section")
+                                            
+                                            for detail in updated_details:
+                                                results_text.insert("end", f"Database ID: ", "label")
+                                                results_text.insert("end", f"{detail['id']}\n", "id_value")
+                                                
+                                                if detail.get('price_changed'):
+                                                    results_text.insert("end", "💰 PRICE CHANGED\n", "price_change")
+                                                
+                                                results_text.insert("end", "-"*60 + "\n", "separator")
+                                                
+                                                for key, value in detail.items():
+                                                    if key in ('id', 'price_changed'):
+                                                        continue
+                                                    results_text.insert("end", f"{key}: ", "label")
+                                                    results_text.insert("end", f"{value}\n", "value")
+                                                
+                                                results_text.insert("end", "\n", "value")
+                                        
+                                        # Configure tags
+                                        results_text.tag_config("section", foreground="#3498DB", font=("Consolas", 10, "bold"))
+                                        results_text.tag_config("label", foreground="#F39C12", font=("Consolas", 9, "bold"))
+                                        results_text.tag_config("value", foreground="#ECF0F1")
+                                        results_text.tag_config("id_value", foreground="#2ECC71", font=("Consolas", 10, "bold"))
+                                        results_text.tag_config("separator", foreground="#5D6D7E")
+                                        results_text.tag_config("price_change", foreground="#E74C3C", font=("Consolas", 9, "bold"))
+                                        
+                                        results_text.config(state="disabled")
+                                        
+                                        # Close button
+                                        close_btn = tk.Button(results_win, text="Close", command=results_win.destroy,
+                                                            bg="#E74C3C", fg="white", font=("Segoe UI", 10, "bold"),
+                                                            relief="flat", padx=20, pady=5)
+                                        close_btn.pack(pady=10)
+                                        
+                                        log_to_file(f"[Queue] Browser opened for Website {job_id} at right 80%")
+                                        log_to_file(f"[Queue] ✓ Saved HTML: {html_path}")
+                                        log_to_file(f"[Queue] ✓ Extracted {len(listings)} listings to {json_path}")
+                                        log_to_file(f"[Queue] ✓ Database: {inserted} inserted, {updated} updated")
+                                        
+                                    except ImportError:
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] ERROR: Selenium not installed\n")
+                                        log_text.insert("end", f"[{timestamp}] Run: pip install selenium\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        log_to_file(f"[Queue] Selenium not installed")
+                                    except Exception as browser_err:
+                                        log_text.config(state="normal")
+                                        timestamp = datetime.now().strftime("%H:%M:%S")
+                                        log_text.insert("end", f"[{timestamp}] ERROR: {str(browser_err)}\n")
+                                        log_text.see("end")
+                                        log_text.config(state="disabled")
+                                        log_to_file(f"[Queue] Browser error: {browser_err}")
+                                
+                                # Auto-launch browser in background thread
+                                import threading
+                                threading.Thread(target=open_website_browser, daemon=True).start()
+                                
+                                log_to_file(f"[Queue] Opened activity window for Website {job_id}")
+                            except Exception as activity_err:
+                                log_to_file(f"[Queue] Failed to open activity window: {activity_err}")
+                                import traceback
+                                traceback.print_exc()
+                    return
+                
+                # Handle Edit button click (column #13 - ✏️)
+                if column == "#13":
                     values = self._queue_tree.item(item, "values")
                     if values and len(values) > 0:
                         # Extract job_id from "▶ 123" format
@@ -3227,7 +5111,58 @@ class OldCompactHUD:
                         self._show_edit_dialog(job_id, table)
                     return
                 
-                # Handle Link column click (#2) - open in browser
+                # Handle Link column click (#2) or Availability Website (#5) in Websites tab - open at 80% right with 75% zoom
+                table = self._current_table.get()
+                if (column == "#2" or column == "#5") and str(table).lower() in ('listing_websites', 'websites'):
+                    values = self._queue_tree.item(item, "values")
+                    if values and len(values) > 2:
+                        # Column #2 = Website (get from hidden2 index 15), Column #5 = Availability Website (index 5)
+                        link = values[15] if column == "#2" and len(values) > 15 else values[5] if column == "#5" and len(values) > 5 else None
+                        
+                        if link and str(link).strip() and 'http' in str(link).lower():
+                            try:
+                                # Open browser at right 80% with 75% zoom
+                                import threading
+                                def open_browser_right():
+                                    try:
+                                        from selenium import webdriver
+                                        from selenium.webdriver.chrome.options import Options
+                                        
+                                        chrome_options = Options()
+                                        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+                                        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+                                        chrome_options.add_experimental_option('useAutomationExtension', False)
+                                        
+                                        driver = webdriver.Chrome(options=chrome_options)
+                                        
+                                        # Position at right 80%
+                                        screen_w = self._root.winfo_screenwidth()
+                                        screen_h = self._root.winfo_screenheight()
+                                        win_w = int(screen_w * 0.20)  # Left 20%
+                                        browser_w = int(screen_w * 0.80)  # Right 80%
+                                        
+                                        driver.set_window_position(win_w, 0)
+                                        driver.set_window_size(browser_w, screen_h)
+                                        driver.get(link)
+                                        driver.execute_script("document.body.style.zoom='75%'")
+                                        
+                                        log_to_file(f"[Queue] Opened {link} at right 80% with 75% zoom")
+                                    except ImportError:
+                                        import webbrowser
+                                        webbrowser.open(link)
+                                        log_to_file(f"[Queue] Selenium not available, opened in default browser: {link}")
+                                    except Exception as e:
+                                        log_to_file(f"[Queue] Browser error: {e}")
+                                
+                                threading.Thread(target=open_browser_right, daemon=True).start()
+                                col_name = "Website" if column == "#2" else "Availability Website"
+                                self._queue_status_label.config(text=f"✓ Opening {col_name} at 80% right...")
+                                log_to_file(f"[Queue] Opening {col_name}: {link}")
+                            except Exception as open_err:
+                                log_to_file(f"[Queue] Failed to open link: {open_err}")
+                    return
+                
+                # Handle Link column click (#2) - open in browser (for Networks tab)
                 if column == "#2":
                     values = self._queue_tree.item(item, "values")
                     if values and len(values) > 1:
@@ -3264,6 +5199,68 @@ class OldCompactHUD:
                     }[column]
                     
                     self._show_apartment_listings(network_id, filter_type)
+                    return
+                
+                # Handle Link column click in Parcel tab (#4 = Link column in 6-column layout)
+                if column == "#4" and str(self._current_table.get()).lower() == "parcel":
+                    # Open parcel_link in browser
+                    if hasattr(self, '_parcel_links') and item in self._parcel_links:
+                        parcel_link = self._parcel_links[item]
+                        if parcel_link:
+                            import webbrowser
+                            webbrowser.open(parcel_link)
+                            log_to_file(f"[Parcel] Opened link: {parcel_link}")
+                    return
+                
+                # Handle Data column click in Parcel tab (#5 = Data column in 6-column layout)
+                if column == "#5" and str(self._current_table.get()).lower() == "parcel":
+                    values = self._queue_tree.item(item, "values")
+                    if values and len(values) >= 3:  # Need at least ID, Address, Metro
+                        # Get JSON data from dictionary using item_id
+                        json_dump = self._parcel_json_data.get(item, '{}')
+                        parcel_id = str(values[0]).replace("▶", "").replace("🔴", "").replace("🟢", "").strip()
+                        address = values[1] if len(values) > 1 else "Unknown"
+                        
+                        # Show JSON data in a popup window
+                        try:
+                            import json
+                            data_window = tk.Toplevel(self._root)
+                            data_window.title(f"Parcel Data - ID {parcel_id}")
+                            data_window.geometry("800x600")
+                            
+                            # Header
+                            header = tk.Frame(data_window, bg="#2c3e50", height=60)
+                            header.pack(fill=tk.X)
+                            tk.Label(header, text=f"📊 Parcel Data", font=("Segoe UI", 14, "bold"),
+                                    bg="#2c3e50", fg="white").pack(side=tk.LEFT, padx=20, pady=15)
+                            tk.Label(header, text=f"Address: {address}", font=("Segoe UI", 10),
+                                    bg="#2c3e50", fg="#ecf0f1").pack(side=tk.LEFT, padx=10)
+                            
+                            # Content frame with scrollbar
+                            content_frame = tk.Frame(data_window)
+                            content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+                            
+                            scrollbar = tk.Scrollbar(content_frame)
+                            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+                            
+                            text_widget = tk.Text(content_frame, wrap=tk.WORD, yscrollcommand=scrollbar.set,
+                                                font=("Consolas", 10), bg="#ecf0f1", fg="#2c3e50")
+                            text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+                            scrollbar.config(command=text_widget.yview)
+                            
+                            # Parse and display JSON
+                            try:
+                                data = json.loads(json_dump) if json_dump and json_dump != '{}' else {}
+                                formatted = json.dumps(data, indent=2)
+                                text_widget.insert("1.0", formatted)
+                            except:
+                                text_widget.insert("1.0", json_dump or "No data available")
+                            
+                            text_widget.config(state=tk.DISABLED)
+                            
+                        except Exception as json_err:
+                            log_to_file(f"[Parcel] Error showing data window: {json_err}")
+                            messagebox.showerror("Error", f"Failed to display data: {json_err}")
                     return
                 
                 if column in step_map:
@@ -3384,6 +5381,9 @@ class OldCompactHUD:
         
         self._queue_tree.bind("<Button-1>", safe_tree_click, add="+")
         
+        # Store the safe_tree_click handler for tree recreation
+        self._safe_tree_click_handler = safe_tree_click
+        
         # Right-click handler for JSON column (#7 = 2.JSON), Parcel empty-count (#5), and Error status rows
         def safe_tree_right_click(event):
             try:
@@ -3468,6 +5468,25 @@ class OldCompactHUD:
                         if metro_name and metro_name != '-':
                             log_to_file(f"[Parcel] Right-click on Empty Parcels for metro: {metro_name}")
                             self._show_empty_parcels_window(metro_name)
+                
+                # Case 4: Websites tab, Last Scraped column (#7) → show all scraped apartment_listings data
+                if table_now in ('listing_websites', 'websites') and column == "#7" and item:
+                    values = self._queue_tree.item(item, "values")
+                    if values and len(values) > 0:
+                        # Extract job_id from column #2 (ID column with potential ✅/❌)
+                        job_id_str = str(values[1]).replace("✅", "").replace("❌", "").replace("▶", "").strip()
+                        try:
+                            job_id = int(job_id_str)
+                        except:
+                            job_id = job_id_str
+                        
+                        # Check if this building has been scraped
+                        last_scraped_val = str(values[6]).strip()
+                        if last_scraped_val:
+                            log_to_file(f"[Websites] Right-click on Last Scraped for google_places {job_id}")
+                            self._show_scraped_data_window(job_id)
+                        else:
+                            log_to_file(f"[Websites] No scraped data for google_places {job_id}")
             except Exception as e:
                 log_to_file(f"[Queue] Right-click handler error: {e}")
                 log_exception("Tree right-click handler")
@@ -3511,12 +5530,186 @@ class OldCompactHUD:
                 log_to_file(f"[Queue] Double-click handler error: {e}")
         self._queue_tree.bind("<Double-1>", safe_tree_double_click, add="+")
         
-        # Scrollbar
-        scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self._queue_tree.yview)
-        self._queue_tree.configure(yscrollcommand=scroll.set)
-        self._queue_tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        # Scrollbar (already added above during initial tree setup)
+        # Removed duplicate scrollbar code to avoid conflicts
 
+        # ============== Websites: Scraped Data window ==============
+        def _show_scraped_data_window(google_places_id: int):
+            """Show all apartment_listings scraped from this building"""
+            log_to_file(f"[SCRAPED DATA] Opening scraped data window for google_places_id={google_places_id}")
+            try:
+                import mysql.connector
+                from datetime import datetime
+                
+                # Query all apartment_listings for this building
+                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                cursor = conn.cursor(dictionary=True)
+                
+                # Get building name and last scraped time
+                cursor.execute("""
+                    SELECT Name, availability_website_last_scraped 
+                    FROM google_places 
+                    WHERE id = %s
+                """, (google_places_id,))
+                building_info = cursor.fetchone()
+                
+                if not building_info:
+                    log_to_file(f"[SCRAPED DATA] No building found for ID {google_places_id}")
+                    cursor.close()
+                    conn.close()
+                    return
+                
+                building_name = building_info.get('Name', f'Building {google_places_id}')
+                last_scraped = building_info.get('availability_website_last_scraped', '')
+                
+                # Format last scraped time
+                if last_scraped:
+                    if isinstance(last_scraped, str):
+                        dt = datetime.strptime(last_scraped, '%Y-%m-%d %H:%M:%S')
+                    else:
+                        dt = last_scraped
+                    
+                    now = datetime.now()
+                    diff = now - dt
+                    
+                    if diff.days > 0:
+                        time_ago = f"{diff.days} day{'s' if diff.days > 1 else ''} ago"
+                    elif diff.seconds >= 3600:
+                        hours = diff.seconds // 3600
+                        time_ago = f"{hours} hour{'s' if hours > 1 else ''} ago"
+                    elif diff.seconds >= 60:
+                        minutes = diff.seconds // 60
+                        time_ago = f"{minutes} minute{'s' if minutes > 1 else ''} ago"
+                    else:
+                        time_ago = "just now"
+                    
+                    last_scraped_text = f"{dt.strftime('%Y-%m-%d %H:%M:%S')} ({time_ago})"
+                else:
+                    last_scraped_text = "Never scraped"
+                
+                # Query apartment listings
+                cursor.execute("""
+                    SELECT id, unit_number, title, bedrooms, bathrooms, sqft, price, 
+                           available_date, other_details, full_address, email_contact, 
+                           phone_contact, img_urls, listing_website, time_created, time_updated
+                    FROM apartment_listings 
+                    WHERE google_places_id = %s
+                    ORDER BY time_updated DESC
+                """, (google_places_id,))
+                listings = cursor.fetchall()
+                
+                cursor.close()
+                conn.close()
+                
+                # Create window
+                win = tk.Toplevel(self._root)
+                win.title(f"Scraped Data — {building_name}")
+                win.geometry("800x600")
+                win.configure(bg="#34495E")
+                
+                # Header
+                header_frame = tk.Frame(win, bg="#2C3E50")
+                header_frame.pack(fill="x", padx=10, pady=10)
+                
+                tk.Label(header_frame, text=f"📊 {building_name}", 
+                        font=("Segoe UI", 14, "bold"), bg="#2C3E50", fg="white").pack()
+                tk.Label(header_frame, text=f"Last Scraped: {last_scraped_text}", 
+                        font=("Segoe UI", 9), bg="#2C3E50", fg="#BDC3C7").pack()
+                tk.Label(header_frame, text=f"{len(listings)} listing{'s' if len(listings) != 1 else ''} found", 
+                        font=("Segoe UI", 9), bg="#2C3E50", fg="#BDC3C7").pack()
+                
+                # Scrollable text area
+                text_frame = tk.Frame(win, bg="#34495E")
+                text_frame.pack(fill="both", expand=True, padx=10, pady=10)
+                
+                scrollbar = tk.Scrollbar(text_frame)
+                scrollbar.pack(side="right", fill="y")
+                
+                text = tk.Text(text_frame, font=("Consolas", 9), bg="#1C2833", 
+                              fg="#ECF0F1", wrap="word", relief="flat",
+                              yscrollcommand=scrollbar.set)
+                text.pack(side="left", fill="both", expand=True)
+                scrollbar.config(command=text.yview)
+                
+                # Display listings
+                if listings:
+                    for idx, listing in enumerate(listings, 1):
+                        text.insert("end", f"\n{'='*80}\n", "separator")
+                        text.insert("end", f"LISTING #{idx}\n", "header")
+                        text.insert("end", f"{'='*80}\n", "separator")
+                        
+                        text.insert("end", f"\nDatabase ID: ", "label")
+                        text.insert("end", f"{listing['id']}\n", "value")
+                        
+                        # Display all fields
+                        fields = [
+                            ('Unit Number', listing.get('unit_number')),
+                            ('Title', listing.get('title')),
+                            ('Bedrooms', listing.get('bedrooms')),
+                            ('Bathrooms', listing.get('bathrooms')),
+                            ('Square Feet', listing.get('sqft')),
+                            ('Price', f"${listing.get('price')}" if listing.get('price') else None),
+                            ('Available Date', listing.get('available_date')),
+                            ('Full Address', listing.get('full_address')),
+                            ('Email', listing.get('email_contact')),
+                            ('Phone', listing.get('phone_contact')),
+                            ('Listing Website', listing.get('listing_website')),
+                        ]
+                        
+                        for field_name, field_value in fields:
+                            if field_value:
+                                text.insert("end", f"{field_name}: ", "label")
+                                text.insert("end", f"{field_value}\n", "value")
+                        
+                        # Parse other_details JSON
+                        other_details = listing.get('other_details')
+                        if other_details:
+                            try:
+                                import json
+                                details_dict = json.loads(other_details)
+                                text.insert("end", "\nAdditional Details:\n", "label")
+                                for key, value in details_dict.items():
+                                    if value:
+                                        text.insert("end", f"  {key}: ", "label")
+                                        if isinstance(value, list):
+                                            text.insert("end", f"{', '.join(map(str, value))}\n", "value")
+                                        else:
+                                            text.insert("end", f"{value}\n", "value")
+                            except:
+                                pass
+                        
+                        # Image count
+                        img_urls = listing.get('img_urls', '')
+                        if img_urls:
+                            img_count = len(img_urls.split(','))
+                            text.insert("end", f"\nImages: ", "label")
+                            text.insert("end", f"{img_count} photo{'s' if img_count > 1 else ''}\n", "value")
+                        
+                        # Timestamps
+                        text.insert("end", f"\nCreated: ", "label")
+                        text.insert("end", f"{listing.get('time_created', 'N/A')}\n", "value")
+                        text.insert("end", f"Updated: ", "label")
+                        text.insert("end", f"{listing.get('time_updated', 'N/A')}\n", "value")
+                else:
+                    text.insert("end", "\n\n⚠️ No listings found for this building.\n\n", "header")
+                    text.insert("end", "This building may not have been scraped yet, or no available units were found.\n", "value")
+                
+                # Configure tags
+                text.tag_config("separator", foreground="#7F8C8D")
+                text.tag_config("header", foreground="#3498DB", font=("Consolas", 11, "bold"))
+                text.tag_config("label", foreground="#F39C12", font=("Consolas", 9, "bold"))
+                text.tag_config("value", foreground="#ECF0F1")
+                
+                text.config(state="disabled")
+                
+                log_to_file(f"[SCRAPED DATA] Displayed {len(listings)} listings for {building_name}")
+                
+            except Exception as e:
+                log_to_file(f"[SCRAPED DATA] Error: {e}")
+                log_exception("Scraped data window")
+        
+        self._show_scraped_data_window = _show_scraped_data_window
+        
         # ============== Parcel: Empty Parcels window ==============
         def _show_empty_parcels_window(metro_name: str):
             log_to_file(f"[EMPTY PARCELS WINDOW] ========== Opening Empty Parcels Window ==========")
@@ -3713,7 +5906,14 @@ class OldCompactHUD:
                     # Setup Chrome with existing profile or new instance
                     chrome_options = Options()
                     chrome_options.add_argument("--start-maximized")
-                    log_to_file("[PARCEL AUTOMATION] Chrome options configured: --start-maximized")
+                    # Disable Google services that require JWT authentication
+                    chrome_options.add_argument("--disable-sync")
+                    chrome_options.add_argument("--no-first-run")
+                    chrome_options.add_argument("--no-service-autorun")
+                    chrome_options.add_argument("--password-store=basic")
+                    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+                    chrome_options.add_experimental_option('useAutomationExtension', False)
+                    log_to_file("[PARCEL AUTOMATION] Chrome options configured with Google auth disabled")
                     
                     driver = None
                     try:
@@ -4048,7 +6248,7 @@ class OldCompactHUD:
         self._show_empty_parcels_window = _show_empty_parcels_window
         
         # Loading indicator overlay (initially hidden)
-        self._loading_overlay = tk.Label(tree_frame, text="⏳ Loading...", fg="#FFFFFF", bg="#2C3E50", 
+        self._loading_overlay = tk.Label(self._tree_frame, text="⏳ Loading...", fg="#FFFFFF", bg="#2C3E50", 
                                          font=("Segoe UI", 12, "bold"), bd=2, relief="raised", padx=20, pady=10)
         # Don't pack it yet - we'll place() it when needed
         self._loading_table_name = ""  # Track which table is loading
@@ -4144,6 +6344,31 @@ class OldCompactHUD:
                     log_to_file(f"[Metro] Metro changed to: '{selected_metro}' | Current table: {current_table}")
                     # Update the StringVar to match
                     self._selected_metro.set(selected_metro)
+                    
+                    # Update parcel link display if on Parcel tab
+                    if str(current_table).lower() == 'parcel':
+                        try:
+                            import mysql.connector
+                            conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta')
+                            cursor = conn.cursor(dictionary=True)
+                            metro = selected_metro if selected_metro and selected_metro != 'All' else 'Seattle'
+                            cursor.execute("SELECT parcel_link FROM major_metros WHERE metro_name = %s", (metro,))
+                            result = cursor.fetchone()
+                            cursor.close()
+                            conn.close()
+                            if result and result.get('parcel_link'):
+                                link = result['parcel_link']
+                                log_to_file(f"[Metro] Updated parcel link to: {link}")
+                                if hasattr(self, '_parcel_link_display'):
+                                    self._parcel_link_display.config(text=link)
+                                if hasattr(self, '_parcel_link_label'):
+                                    self._parcel_link_label.config(text=link)
+                            else:
+                                log_to_file(f"[Metro] No link found for metro: {metro}")
+                                if hasattr(self, '_parcel_link_display'):
+                                    self._parcel_link_display.config(text="No parcel link available for this metro")
+                        except Exception as link_err:
+                            log_to_file(f"[Metro] Error updating parcel link: {link_err}")
                     
                     # Refresh table for any tab when metro changes
                     def _do_refresh():
@@ -4259,9 +6484,9 @@ class OldCompactHUD:
                 table_name = self._loading_table_name or "data"
                 self._loading_overlay.config(text=f"⏳ Loading {table_name}...")
                 # Center the loading overlay on the tree_frame
-                tree_frame.update_idletasks()
-                x = tree_frame.winfo_width() // 2 - 100
-                y = tree_frame.winfo_height() // 2 - 20
+                self._tree_frame.update_idletasks()
+                x = self._tree_frame.winfo_width() // 2 - 100
+                y = self._tree_frame.winfo_height() // 2 - 20
                 self._loading_overlay.place(x=x, y=y)
                 self._loading_overlay.lift()
             except Exception as e:
@@ -4319,15 +6544,836 @@ class OldCompactHUD:
                 log_to_file(f"[Parcel] Refresh trigger failed: {e}")
         self._trigger_parcel_refresh = _trigger_parcel_refresh
         
+        # Auto Capture function - captures parcels one by one, processes in batches of 20
+        def _start_auto_capture():
+            """Start automated parcel capture and processing workflow"""
+            if self._auto_capture_running:
+                log_to_file("[Auto Capture] Already running, stopping...")
+                self._auto_capture_running = False
+                self._auto_capture_paused = False
+                self._auto_capture_btn.config(text="🤖 Auto Capture", bg="#27AE60")
+                if hasattr(self, '_parcel_activity_window'):
+                    try:
+                        self._parcel_activity_window.destroy()
+                    except:
+                        pass
+                return
+            
+            log_to_file("[Auto Capture] Starting automated capture workflow")
+            self._auto_capture_running = True
+            self._auto_capture_paused = False
+            self._auto_capture_btn.config(text="⏸️ Stop", bg="#E74C3C")
+            
+            # Create Parcel Activity Window
+            activity_win = tk.Toplevel(root)
+            activity_win.title("Parcel Activity")
+            
+            # Position at left 20% of screen
+            screen_w = activity_win.winfo_screenwidth()
+            screen_h = activity_win.winfo_screenheight()
+            win_w = int(screen_w * 0.20)  # 20% width
+            win_h = screen_h
+            activity_win.geometry(f"{win_w}x{win_h}+0+0")
+            activity_win.configure(bg="#2C3E50")
+            
+            # Title
+            title_lbl = tk.Label(
+                activity_win,
+                text="🤖 Parcel Auto Capture",
+                font=("Segoe UI", 12, "bold"),
+                bg="#34495E",
+                fg="white",
+                pady=10
+            )
+            title_lbl.pack(fill="x")
+            
+            # Progress stats frame
+            stats_frame = tk.Frame(activity_win, bg="#2C3E50")
+            stats_frame.pack(fill="x", padx=10, pady=10)
+            
+            def create_stat_label(parent, label_text, value_text="0"):
+                frame = tk.Frame(parent, bg="#34495E", bd=1, relief="solid")
+                frame.pack(fill="x", pady=4)
+                lbl = tk.Label(frame, text=label_text, font=("Segoe UI", 9), bg="#34495E", fg="#BDC3C7", anchor="w")
+                lbl.pack(side="left", padx=8, pady=4)
+                val = tk.Label(frame, text=value_text, font=("Segoe UI", 10, "bold"), bg="#34495E", fg="white", anchor="e")
+                val.pack(side="right", padx=8, pady=4)
+                return val
+            
+            captured_lbl = create_stat_label(stats_frame, "📷 Captured:", "0")
+            processed_lbl = create_stat_label(stats_frame, "✅ Processed:", "0")
+            pending_lbl = create_stat_label(stats_frame, "⏳ Pending:", "0")
+            remaining_lbl = create_stat_label(stats_frame, "📋 Remaining:", "0")
+            
+            # Control buttons frame
+            controls_frame = tk.Frame(activity_win, bg="#2C3E50")
+            controls_frame.pack(fill="x", padx=10, pady=10)
+            
+            def toggle_pause():
+                if hasattr(self, '_auto_capture_paused'):
+                    self._auto_capture_paused = not self._auto_capture_paused
+                    if self._auto_capture_paused:
+                        pause_btn.config(text="▶️ Resume", bg="#27AE60")
+                        log_activity("⏸️ Paused")
+                    else:
+                        pause_btn.config(text="⏸️ Pause", bg="#F39C12")
+                        log_activity("▶️ Resumed")
+            
+            def open_parcels_folder():
+                import subprocess
+                parcels_path = r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels"
+                subprocess.Popen(f'explorer "{parcels_path}"')
+            
+            pause_btn = tk.Button(
+                controls_frame,
+                text="⏸️ Pause",
+                font=("Segoe UI", 10, "bold"),
+                bg="#F39C12",
+                fg="white",
+                relief="flat",
+                cursor="hand2",
+                command=toggle_pause
+            )
+            pause_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+            
+            folder_btn = tk.Button(
+                controls_frame,
+                text="📁 Open Folder",
+                font=("Segoe UI", 10, "bold"),
+                bg="#3498DB",
+                fg="white",
+                relief="flat",
+                cursor="hand2",
+                command=open_parcels_folder
+            )
+            folder_btn.pack(side="right", fill="x", expand=True, padx=(5, 0))
+            
+            # Progress bar frame
+            progress_frame = tk.Frame(activity_win, bg="#2C3E50")
+            progress_frame.pack(fill="x", padx=10, pady=10)
+            
+            progress_label = tk.Label(
+                progress_frame,
+                text="Progress: 0%",
+                font=("Segoe UI", 9),
+                bg="#2C3E50",
+                fg="#ECF0F1"
+            )
+            progress_label.pack(anchor="w")
+            
+            progress_bar = ttk.Progressbar(
+                progress_frame,
+                mode='determinate',
+                length=win_w - 40,
+                maximum=100
+            )
+            progress_bar.pack(fill="x", pady=5)
+            
+            # Current status
+            status_lbl = tk.Label(
+                activity_win,
+                text="Starting...",
+                font=("Segoe UI", 9),
+                bg="#2C3E50",
+                fg="#ECF0F1",
+                wraplength=win_w - 20,
+                justify="left"
+            )
+            status_lbl.pack(fill="x", padx=10, pady=5)
+            
+            # Activity log (scrollable)
+            log_frame = tk.Frame(activity_win, bg="#2C3E50")
+            log_frame.pack(fill="both", expand=True, padx=10, pady=10)
+            
+            log_scroll = tk.Scrollbar(log_frame)
+            log_scroll.pack(side="right", fill="y")
+            
+            log_text = tk.Text(
+                log_frame,
+                font=("Consolas", 8),
+                bg="#1C2833",
+                fg="#ECF0F1",
+                wrap="word",
+                yscrollcommand=log_scroll.set,
+                height=30
+            )
+            log_text.pack(side="left", fill="both", expand=True)
+            log_scroll.config(command=log_text.yview)
+            
+            def log_activity(msg, color="#ECF0F1"):
+                """Add message to activity log - safely checks if window exists"""
+                try:
+                    # Check if window still exists before updating
+                    if activity_win.winfo_exists():
+                        import datetime
+                        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                        log_text.insert("end", f"[{timestamp}] {msg}\n")
+                        log_text.see("end")
+                        log_text.update()
+                except:
+                    pass
+            
+            # Store references
+            self._parcel_activity_window = activity_win
+            self._parcel_activity_log = log_activity
+            self._parcel_stats = {
+                'captured': captured_lbl,
+                'processed': processed_lbl,
+                'pending': pending_lbl,
+                'remaining': remaining_lbl,
+                'status': status_lbl
+            }
+            self._progress_bar = progress_bar
+            self._progress_label = progress_label
+            
+            # Helper function to safely update activity window (checks if it still exists)
+            def safe_activity_update(callback):
+                """Execute callback only if activity window still exists"""
+                try:
+                    if hasattr(self, '_parcel_activity_window') and self._parcel_activity_window.winfo_exists():
+                        callback()
+                except:
+                    pass
+            
+            def safe_stats_update(stat_name, **config_kwargs):
+                """Safely update stats labels - checks if window exists"""
+                try:
+                    if hasattr(self, '_parcel_activity_window') and self._parcel_activity_window.winfo_exists():
+                        if hasattr(self, '_parcel_stats') and stat_name in self._parcel_stats:
+                            self._parcel_stats[stat_name].config(**config_kwargs)
+                except:
+                    pass
+            
+            self._safe_activity_update = safe_activity_update
+            self._safe_stats_update = safe_stats_update
+            
+            log_activity("🚀 Auto Capture started", "#27AE60")
+            
+            def _run_auto_capture():
+                """Background thread for auto capture"""
+                import time
+                import mysql.connector
+                from pathlib import Path
+                import subprocess
+                import os
+                
+                parcels_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels")
+                parcels_dir.mkdir(parents=True, exist_ok=True)
+                
+                def update_stats():
+                    """Update statistics in activity window - safely checks if window exists"""
+                    try:
+                        if hasattr(self, '_parcel_activity_window') and self._parcel_activity_window.winfo_exists():
+                            all_images = list(parcels_dir.glob("parcels_*.png"))
+                            # Only count base files (exclude _skipped, _processed, and DEBUG)
+                            captured_only = [img for img in all_images 
+                                           if not img.stem.endswith('_processed') 
+                                           and not img.stem.endswith('_skipped')
+                                           and not img.stem.startswith('DEBUG_')]
+                            unprocessed = [img for img in all_images 
+                                         if not img.stem.endswith('_processed') 
+                                         and not img.stem.endswith('_skipped')
+                                         and not img.stem.startswith('DEBUG_')]
+                            processed = [img for img in all_images if img.stem.endswith('_processed')]
+                            
+                            if hasattr(self, '_parcel_stats'):
+                                if 'captured' in self._parcel_stats:
+                                    self._parcel_stats['captured'].config(text=str(len(captured_only)))
+                                if 'processed' in self._parcel_stats:
+                                    self._parcel_stats['processed'].config(text=str(len(processed)))
+                                if 'pending' in self._parcel_stats:
+                                    self._parcel_stats['pending'].config(text=str(len(unprocessed)))
+                    except:
+                        pass
+                
+                # Open browser ONCE at the start and position it
+                import webbrowser
+                from PIL import ImageGrab
+                import pyautogui
+                
+                browser_opened = False
+                
+                try:
+                    while self._auto_capture_running:
+                        # Check if paused
+                        if hasattr(self, '_auto_capture_paused') and self._auto_capture_paused:
+                            self._root.after(0, lambda: self._safe_stats_update('status', text="⏸️ Paused"))
+                            time.sleep(1)
+                            continue
+                        
+                        # Update stats
+                        self._root.after(0, update_stats)
+                        
+                        # Check unprocessed image count (exclude DEBUG and _skipped)
+                        all_images = list(parcels_dir.glob("parcels_*.png"))
+                        unprocessed = [img for img in all_images 
+                                      if not img.stem.endswith('_processed') 
+                                      and not img.stem.endswith('_skipped')
+                                      and not img.stem.startswith('DEBUG_')]
+                        
+                        if len(unprocessed) >= 20:
+                            log_to_file(f"[Auto Capture] Found {len(unprocessed)} unprocessed images - processing batch...")
+                            self._root.after(0, lambda: self._parcel_activity_log(f"📦 Processing batch of {len(unprocessed)} images..."))
+                            self._root.after(0, lambda: self._safe_stats_update('status', text="🔄 Processing with OpenAI..."))
+                            
+                            # Run OpenAI processing
+                            try:
+                                api_key = os.getenv('OPENAI_API_KEY')
+                                if not api_key:
+                                    log_to_file("[Auto Capture] ERROR: OPENAI_API_KEY not set")
+                                    self._root.after(0, lambda: self._parcel_activity_log("❌ ERROR: OPENAI_API_KEY environment variable not set!"))
+                                    break
+                                
+                                # Validate API key format
+                                if not api_key.startswith('sk-'):
+                                    log_to_file(f"[Auto Capture] ERROR: Invalid API key format: {api_key[:20]}...")
+                                    self._root.after(0, lambda: self._parcel_activity_log("❌ ERROR: Invalid OpenAI API key format!"))
+                                    break
+                                
+                                log_to_file(f"[Auto Capture] Using API key: {api_key[:20]}...{api_key[-4:]}")
+                                self._root.after(0, lambda k=api_key: self._parcel_activity_log(f"🔑 API Key: {k[:20]}...{k[-4:]}"))
+                                
+                                # Run process_with_openai.py and stream output to activity window
+                                # Pass environment variables to subprocess
+                                env = os.environ.copy()
+                                result = subprocess.run(
+                                    ['python', 'process_with_openai.py'],
+                                    capture_output=True,
+                                    text=True,
+                                    encoding='utf-8',  # Force UTF-8 encoding to handle emojis
+                                    errors='replace',  # Replace invalid characters instead of crashing
+                                    timeout=180,  # 3 minute timeout
+                                    env=env  # Pass environment variables including API key
+                                )
+                                
+                                log_to_file(f"[Auto Capture] OpenAI processing complete: {result.returncode}")
+                                
+                                # Check if processing was successful
+                                if result.returncode != 0:
+                                    log_to_file(f"[Auto Capture] ERROR: OpenAI processing failed with code {result.returncode}")
+                                    self._root.after(0, lambda: self._parcel_activity_log(f"❌ OpenAI processing failed! Return code: {result.returncode}"))
+                                    
+                                    # Show stdout (errors are printed there)
+                                    is_fatal_error = False
+                                    if result.stdout:
+                                        log_to_file(f"[Auto Capture] Error output: {result.stdout}")
+                                        output_lines = result.stdout.split('\n')
+                                        for line in output_lines:
+                                            if line.strip():
+                                                # Check for fatal errors that shouldn't retry
+                                                if 'invalid_api_key' in line.lower() or 'incorrect api key' in line.lower() or 'authentication' in line.lower():
+                                                    is_fatal_error = True
+                                                # Use a proper closure to capture the line value
+                                                def log_line(msg=line):
+                                                    self._parcel_activity_log(f"🔴 {msg}")
+                                                self._root.after(0, log_line)
+                                    
+                                    # Show stderr if any
+                                    if result.stderr:
+                                        log_to_file(f"[Auto Capture] Stderr: {result.stderr}")
+                                        stderr_lines = result.stderr.split('\n')
+                                        for line in stderr_lines:
+                                            if line.strip():
+                                                def log_err(msg=line):
+                                                    self._parcel_activity_log(f"⚠️ {msg}")
+                                                self._root.after(0, log_err)
+                                    
+                                    # Stop on fatal errors, pause on retryable errors
+                                    if is_fatal_error:
+                                        log_to_file("[Auto Capture] FATAL ERROR: Stopping automation (bad API key or auth issue)")
+                                        self._root.after(0, lambda: self._parcel_activity_log("❌ FATAL ERROR: Invalid API key! Stopping automation."))
+                                        self._root.after(0, lambda: self._safe_stats_update('status', text="❌ Fatal error - stopped"))
+                                        break  # Stop completely
+                                    else:
+                                        self._root.after(0, lambda: self._safe_stats_update('status', text="❌ Processing failed"))
+                                        time.sleep(5)
+                                        continue  # Retry on non-fatal errors
+                                
+                                # Show detailed output in activity window
+                                if result.stdout:
+                                    log_to_file(f"[Auto Capture] Output: {result.stdout}")
+                                    # Parse and display key information
+                                    success_lines = result.stdout.split('\n')
+                                    for line in success_lines:
+                                        if line.strip():
+                                            def log_success(msg=line):
+                                                self._parcel_activity_log(msg)
+                                            self._root.after(0, log_success)
+                                
+                                if result.stderr:
+                                    log_to_file(f"[Auto Capture] Errors: {result.stderr}")
+                                    success_stderr = result.stderr.split('\n')
+                                    for line in success_stderr:
+                                        if line.strip():
+                                            def log_warn(msg=line):
+                                                self._parcel_activity_log(f"⚠️ {msg}")
+                                            self._root.after(0, log_warn)
+                                
+                                self._root.after(0, lambda: self._parcel_activity_log("✅ Batch processed successfully!"))
+                                self._root.after(0, lambda: self._safe_stats_update('status', text="✅ Batch complete, continuing..."))
+                                
+                                # Refresh the table
+                                self._root.after(0, lambda: self._trigger_parcel_refresh() if hasattr(self, '_trigger_parcel_refresh') else None)
+                                
+                                # Wait a bit before continuing
+                                time.sleep(5)
+                                
+                            except subprocess.TimeoutExpired:
+                                log_to_file("[Auto Capture] OpenAI processing timed out")
+                                self._root.after(0, lambda: self._parcel_activity_log("⚠️ OpenAI processing timed out"))
+                            except Exception as proc_err:
+                                log_to_file(f"[Auto Capture] Processing error: {proc_err}")
+                                self._root.after(0, lambda e=str(proc_err): self._parcel_activity_log(f"❌ Error: {e}"))
+                        
+                        if not self._auto_capture_running:
+                            break
+                        
+                        # Get next address without parcel data that doesn't have an image yet
+                        try:
+                            conn = mysql.connector.connect(
+                                host='localhost', port=3306, user='root', password='', database='offta'
+                            )
+                            cursor = conn.cursor(dictionary=True)
+                            
+                            # Get metro
+                            metro = self._metro_combo.get() if hasattr(self, '_metro_combo') else 'Seattle'
+                            if not metro or metro == 'All':
+                                metro = 'Seattle'
+                            
+                            # Find addresses without parcels and without images
+                            cursor.execute("""
+                                SELECT ga.id, mm.parcel_link
+                                FROM google_addresses ga
+                                INNER JOIN major_metros mm ON mm.id = ga.metro_id
+                                WHERE ga.king_county_parcels_id IS NULL
+                                AND ga.json_dump IS NOT NULL
+                                AND JSON_EXTRACT(ga.json_dump, '$.result') IS NOT NULL
+                                AND mm.metro_name = %s
+                                ORDER BY ga.id ASC
+                                LIMIT 100
+                            """, (metro,))
+                            
+                            candidates = cursor.fetchall()
+                            cursor.close()
+                            conn.close()
+                            
+                            # Find first address that doesn't have an image or skip marker
+                            next_address = None
+                            for candidate in candidates:
+                                addr_id = candidate['id']
+                                image_file = parcels_dir / f"parcels_{addr_id}.png"
+                                processed_file = parcels_dir / f"parcels_{addr_id}_processed.png"
+                                skipped_file = parcels_dir / f"parcels_{addr_id}_skipped.png"
+                                
+                                # Skip if already captured, processed, or marked as skipped
+                                if not image_file.exists() and not processed_file.exists() and not skipped_file.exists():
+                                    next_address = candidate
+                                    break
+                            
+                            if not next_address:
+                                log_to_file("[Auto Capture] No more addresses to capture")
+                                self._root.after(0, lambda: self._parcel_activity_log("✅ All addresses captured!"))
+                                self._root.after(0, lambda: self._safe_stats_update('status', text="✅ Complete!"))
+                                break
+                            
+                            log_to_file(f"[Auto Capture] Capturing address ID: {next_address['id']}")
+                            self._root.after(0, lambda id=next_address['id']: self._parcel_activity_log(f"📸 Capturing address ID: {id}"))
+                            self._root.after(0, lambda id=next_address['id']: self._safe_stats_update('status', text=f"📸 Capturing ID: {id}"))
+                            
+                            # Update remaining count
+                            self._root.after(0, lambda c=len(candidates): self._safe_stats_update('remaining', text=str(c)))
+                            
+                            # Calculate progress percentage (exclude skipped files from captured count)
+                            remaining = len([c for c in candidates if not (parcels_dir / f"parcels_{c['id']}.png").exists() 
+                                           and not (parcels_dir / f"parcels_{c['id']}_processed.png").exists()
+                                           and not (parcels_dir / f"parcels_{c['id']}_skipped.png").exists()])
+                            total_to_capture = len(candidates)
+                            captured_count = len([c for c in candidates if (parcels_dir / f"parcels_{c['id']}.png").exists() 
+                                                 or (parcels_dir / f"parcels_{c['id']}_processed.png").exists()])
+                            progress_pct = int((captured_count / total_to_capture * 100)) if total_to_capture > 0 else 0
+                            
+                            # Safely update progress bar
+                            def update_progress():
+                                try:
+                                    if hasattr(self, '_parcel_activity_window') and self._parcel_activity_window.winfo_exists():
+                                        if hasattr(self, '_progress_bar'):
+                                            self._progress_bar.config(value=progress_pct)
+                                        if hasattr(self, '_progress_label'):
+                                            self._progress_label.config(text=f"Progress: {progress_pct}%")
+                                except:
+                                    pass
+                            self._root.after(0, update_progress)
+                            
+                            # Get address from json_dump and check if we should skip
+                            should_skip = False
+                            try:
+                                conn_addr = mysql.connector.connect(
+                                    host='localhost', port=3306, user='root', password='', database='offta'
+                                )
+                                cursor_addr = conn_addr.cursor(dictionary=True)
+                                cursor_addr.execute("SELECT json_dump FROM google_addresses WHERE id = %s", (next_address['id'],))
+                                addr_row = cursor_addr.fetchone()
+                                cursor_addr.close()
+                                conn_addr.close()
+                                
+                                if addr_row and addr_row['json_dump']:
+                                    import json
+                                    import re
+                                    json_data = json.loads(addr_row['json_dump'])
+                                    address_text = (
+                                        json_data.get('result', {}).get('formatted_address') or
+                                        json_data.get('result', {}).get('name') or
+                                        json_data.get('result', {}).get('vicinity') or
+                                        f"ID:{next_address['id']}"
+                                    )
+                                    
+                                    # Remove unit numbers (e.g., "Unit 123", "Apt A", "#5", etc.)
+                                    if isinstance(address_text, str) and not address_text.startswith('ID:'):
+                                        # Remove patterns like "Unit 123", "Apt A", "#5", etc. at the beginning
+                                        address_text = re.sub(r'^(Unit|Apt|Apartment|Suite|Ste|#)\s*[A-Za-z0-9-]+[,\s]+', '', address_text, flags=re.IGNORECASE)
+                                        # Remove patterns like ", Unit 123" or ", Apt A" in the middle/end
+                                        address_text = re.sub(r'[,\s]+(Unit|Apt|Apartment|Suite|Ste|#)\s*[A-Za-z0-9-]+', '', address_text, flags=re.IGNORECASE)
+                                    
+                                    # SKIP addresses that start with a letter (not numeric addresses)
+                                    # BUT: Allow addresses that are building names followed by comma (these often need to be truncated)
+                                    if isinstance(address_text, str) and not address_text.startswith('ID:') and address_text and address_text[0].isalpha():
+                                        # Check if this is a building name (has comma after first part)
+                                        if ',' in address_text:
+                                            # Extract the part after the first comma (the actual street address)
+                                            parts = address_text.split(',', 1)
+                                            if len(parts) > 1:
+                                                street_address = parts[1].strip()
+                                                # If the part after comma starts with a number, use that instead
+                                                if street_address and street_address[0].isdigit():
+                                                    address_text = street_address
+                                                    log_to_file(f"[Auto Capture] Truncated building name, using: {address_text}")
+                                                else:
+                                                    # Skip if even after comma it doesn't start with number
+                                                    log_to_file(f"[Auto Capture] Skipping address (no numeric part): {address_text}")
+                                                    self._root.after(0, lambda a=address_text: self._parcel_activity_log(f"⏭️ Skipped: {a[:50]}"))
+                                                    should_skip = True
+                                            else:
+                                                log_to_file(f"[Auto Capture] Skipping address that starts with letter: {address_text}")
+                                                self._root.after(0, lambda a=address_text: self._parcel_activity_log(f"⏭️ Skipped: {a[:50]}"))
+                                                should_skip = True
+                                        else:
+                                            log_to_file(f"[Auto Capture] Skipping address that starts with letter: {address_text}")
+                                            self._root.after(0, lambda a=address_text: self._parcel_activity_log(f"⏭️ Skipped: {a[:50]}"))
+                                            should_skip = True
+                                else:
+                                    address_text = f"ID:{next_address['id']}"
+                            except:
+                                address_text = f"ID:{next_address['id']}"
+                            
+                            # Skip this address if it starts with a letter - create skip marker first
+                            if should_skip:
+                                # Create skip marker so we don't retry this address
+                                skip_marker = parcels_dir / f"parcels_{next_address['id']}_skipped.txt"
+                                skip_marker.write_text(f"Skipped: address starts with letter at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                                log_to_file(f"[Auto Capture] Created skip marker for ID {next_address['id']}")
+                                time.sleep(1)
+                                continue
+                            
+                            # Background capture without opening new tabs
+                            try:
+                                addr_id = next_address['id']
+                                parcel_link = next_address['parcel_link']
+                                
+                                # Open browser ONCE on first iteration with Chrome zoom flag
+                                if not browser_opened:
+                                    self._root.after(0, lambda: self._parcel_activity_log(f"🌐 Opening browser with 75% zoom..."))
+                                    
+                                    # Try to find Chrome and open with zoom flag
+                                    chrome_paths = [
+                                        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                                        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                                        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                                    ]
+                                    
+                                    chrome_path = None
+                                    for path in chrome_paths:
+                                        if os.path.exists(path):
+                                            chrome_path = path
+                                            break
+                                    
+                                    if chrome_path:
+                                        # Open Chrome with force-device-scale-factor flag (0.75 = 75% zoom)
+                                        log_to_file(f"[Auto Capture] Opening Chrome with 75% zoom at: {chrome_path}")
+                                        subprocess.Popen([
+                                            chrome_path,
+                                            f"--force-device-scale-factor=0.75",
+                                            "--new-window",
+                                            parcel_link
+                                        ])
+                                        self._root.after(0, lambda: self._parcel_activity_log(f"✅ Chrome launched with 75% zoom"))
+                                    else:
+                                        # Fallback to default browser
+                                        log_to_file("[Auto Capture] Chrome not found, using default browser")
+                                        self._root.after(0, lambda: self._parcel_activity_log(f"⚠️ Chrome not found, using default browser"))
+                                        webbrowser.open(parcel_link)
+                                    
+                                    time.sleep(4)  # Wait for Chrome to start
+                                    
+                                    # Position browser window to right 80% of screen
+                                    try:
+                                        import pygetwindow as gw
+                                        
+                                        screen_w = pyautogui.size()[0]
+                                        screen_h = pyautogui.size()[1]
+                                        
+                                        # Calculate right 80% position
+                                        window_width = int(screen_w * 0.8)
+                                        window_height = screen_h
+                                        window_x = int(screen_w * 0.2)  # Start at 20%
+                                        window_y = 0
+                                        
+                                        # Find browser window
+                                        browser_window = None
+                                        for window in gw.getAllWindows():
+                                            if 'chrome' in window.title.lower() or 'parcel viewer' in window.title.lower():
+                                                browser_window = window
+                                                break
+                                        
+                                        if browser_window:
+                                            browser_window.moveTo(window_x, window_y)
+                                            browser_window.resizeTo(window_width, window_height)
+                                            browser_window.activate()
+                                            log_to_file(f"[Auto Capture] Positioned browser at ({window_x}, {window_y})")
+                                            self._root.after(0, lambda: self._parcel_activity_log(f"✅ Browser positioned at right 80%"))
+                                        else:
+                                            log_to_file("[Auto Capture] Could not find browser window to position")
+                                            self._root.after(0, lambda: self._parcel_activity_log(f"⚠️ Could not position browser"))
+                                    except Exception as pos_err:
+                                        log_to_file(f"[Auto Capture] Window positioning error: {pos_err}")
+                                    
+                                    time.sleep(4)  # Wait for page load after positioning
+                                    browser_opened = True
+                                    self._root.after(0, lambda: self._parcel_activity_log(f"✅ Browser ready"))
+                                
+                                # Check if paused before mouse movements
+                                while self._auto_capture_paused:
+                                    time.sleep(0.5)
+                                    self._root.after(0, lambda: self._safe_stats_update('status', text="⏸️ Paused"))
+                                
+                                if not self._auto_capture_running:
+                                    break
+                                
+                                # For subsequent addresses, use the search field
+                                self._root.after(0, lambda a=address_text: self._parcel_activity_log(f"🔍 Searching for: {a}"))
+                                
+                                # Click search field at exact coordinates (459, 199) - NOT adjusted
+                                search_field_x = 459
+                                search_field_y = 199
+                                
+                                # Triple-click to select all existing text
+                                pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.1)
+                                time.sleep(0.2)
+                                
+                                # Delete existing content - press backspace 30 times to ensure it's cleared
+                                for _ in range(30):
+                                    pyautogui.press('backspace')
+                                time.sleep(0.1)
+                                
+                                # Type new address - much faster now
+                                pyautogui.write(address_text, interval=0.01)
+                                
+                                # Press Enter to submit
+                                time.sleep(0.2)
+                                pyautogui.press('enter')
+                                time.sleep(2)  # Wait briefly to see if error popup appears
+                                
+                                # Check if there's an error alert by taking a quick screenshot and looking for very bright regions
+                                try:
+                                    quick_check = ImageGrab.grab()
+                                    check_array = np.array(quick_check)
+                                    check_gray = cv2.cvtColor(check_array, cv2.COLOR_RGB2GRAY)
+                                    _, check_thresh = cv2.threshold(check_gray, 250, 255, cv2.THRESH_BINARY)
+                                    bright_pixels = np.sum(check_thresh == 255)
+                                    total_pixels = check_thresh.size
+                                    bright_ratio = bright_pixels / total_pixels
+                                    
+                                    # If there's a high concentration of very bright pixels, likely an alert
+                                    if bright_ratio > 0.05:  # More than 5% very bright pixels suggests alert
+                                        log_to_file(f"[Auto Capture] Detected alert popup (bright ratio: {bright_ratio:.3f}), pressing Enter to dismiss")
+                                        pyautogui.press('enter')
+                                        time.sleep(0.5)
+                                        
+                                        # Clear the search field after dismissing alert
+                                        pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.1)
+                                        time.sleep(0.2)
+                                        for _ in range(30):
+                                            pyautogui.press('backspace')
+                                        log_to_file(f"[Auto Capture] Cleared search field after alert dismissal")
+                                        time.sleep(0.5)
+                                except Exception as alert_err:
+                                    log_to_file(f"[Auto Capture] Alert check error: {alert_err}")
+                                
+                                time.sleep(10)  # Wait remaining time for parcel popup to load
+                                
+                                self._root.after(0, lambda: self._parcel_activity_log(f"📸 Capturing screenshot..."))
+                                
+                                # Capture right 80% of screen
+                                screen_w = pyautogui.size()[0]
+                                screen_h = pyautogui.size()[1]
+                                left_x = int(screen_w * 0.20)  # Start at 20% (skip left activity window)
+                                
+                                full_screenshot = ImageGrab.grab(bbox=(left_x, 0, screen_w, screen_h))
+                                
+                                # Find and crop the info popup box by detecting bright white rectangular regions
+                                popup_image = None
+                                try:
+                                    import numpy as np
+                                    from PIL import Image, ImageDraw
+                                    import cv2
+                                    
+                                    log_to_file(f"[Auto Capture] Starting popup detection for ID {addr_id}")
+                                    
+                                    # Convert to numpy for analysis
+                                    img_array = np.array(full_screenshot)
+                                    
+                                    # Convert to grayscale
+                                    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+                                    
+                                    # Threshold to find very bright regions (white popup boxes)
+                                    _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
+                                    
+                                    # Find contours
+                                    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                    
+                                    log_to_file(f"[Auto Capture] Found {len(contours)} bright regions")
+                                    
+                                    # Look for rectangular contours that match popup size (approx 220x160)
+                                    best_match = None
+                                    best_area_diff = float('inf')
+                                    target_area = 220 * 160
+                                    
+                                    for contour in contours:
+                                        x, y, w, h = cv2.boundingRect(contour)
+                                        area = w * h
+                                        
+                                        # Check if size is reasonable for a popup (wider range: 180-280 wide, 120-200 tall)
+                                        if 180 < w < 280 and 120 < h < 200:
+                                            area_diff = abs(area - target_area)
+                                            log_to_file(f"[Auto Capture] Candidate popup at ({x},{y}) size {w}x{h}, area diff: {area_diff}")
+                                            if area_diff < best_area_diff:
+                                                best_area_diff = area_diff
+                                                best_match = (x, y, w, h)
+                                    
+                                    if best_match:
+                                        x, y, w, h = best_match
+                                        popup_image = full_screenshot.crop((x, y, x+w, y+h))
+                                        log_to_file(f"[Auto Capture] ✓ Found popup at ({x},{y}) size {w}x{h}")
+                                        
+                                        # Save debug image
+                                        debug_img = full_screenshot.copy()
+                                        draw = ImageDraw.Draw(debug_img)
+                                        draw.rectangle([x, y, x+w, y+h], outline="green", width=3)
+                                        debug_path = parcels_dir / f"DEBUG_{addr_id}.png"
+                                        debug_img.save(debug_path)
+                                        log_to_file(f"[Auto Capture] DEBUG saved: {debug_path}")
+                                        
+                                        self._root.after(0, lambda: self._parcel_activity_log(f"✓ Found popup box"))
+                                    else:
+                                        log_to_file(f"[Auto Capture] ✗ No popup-sized white box found")
+                                        
+                                except ImportError:
+                                    log_to_file(f"[Auto Capture] ERROR: opencv-python not installed. Run: pip install opencv-python")
+                                except Exception as detect_err:
+                                    log_to_file(f"[Auto Capture] Popup detection error: {detect_err}")
+                                    import traceback
+                                    log_to_file(f"[Auto Capture] Traceback: {traceback.format_exc()}")
+                                
+
+                                
+                                # Always save screenshot, but use different filename based on template match
+                                if popup_image:
+                                    # Template matched - save cropped popup with normal name
+                                    save_path = parcels_dir / f"parcels_{addr_id}.png"
+                                    popup_image.save(save_path)
+                                    log_to_file(f"[Auto Capture] Saved popup to {save_path}")
+                                    self._root.after(0, lambda: self._parcel_activity_log(f"✅ Captured popup ID: {addr_id}"))
+                                else:
+                                    # No template match - save full screenshot with _skipped suffix
+                                    save_path = parcels_dir / f"parcels_{addr_id}_skipped.png"
+                                    full_screenshot.save(save_path)
+                                    log_to_file(f"[Auto Capture] Saved full screenshot (no popup detected) to {save_path}")
+                                    self._root.after(0, lambda: self._parcel_activity_log(f"⚠️ Skipped ID {addr_id}: no popup detected (screenshot saved)"))
+                                
+                                time.sleep(2)  # Brief pause before next capture
+                                
+                            except Exception as capture_err:
+                                log_to_file(f"[Auto Capture] Capture error: {capture_err}")
+                                self._root.after(0, lambda e=str(capture_err): self._parcel_activity_log(f"❌ Capture error: {e}"))
+                            
+                        except Exception as db_err:
+                            log_to_file(f"[Auto Capture] Database error: {db_err}")
+                            break
+                    
+                    log_to_file("[Auto Capture] Workflow stopped")
+                    self._root.after(0, lambda: self._parcel_activity_log("⏸️ Auto Capture stopped"))
+                    self._root.after(0, lambda: self._safe_stats_update('status', text="⏸️ Stopped"))
+                    
+                except Exception as e:
+                    log_to_file(f"[Auto Capture] Fatal error: {e}")
+                    self._root.after(0, lambda err=str(e): self._parcel_activity_log(f"❌ Fatal error: {err}"))
+                    import traceback
+                    traceback.print_exc()
+                finally:
+                    self._auto_capture_running = False
+                    self._root.after(0, lambda: self._auto_capture_btn.config(text="🤖 Auto Capture", bg="#27AE60"))
+            
+            # Start in background thread
+            import threading
+            threading.Thread(target=_run_auto_capture, daemon=True).start()
+        
+        self._start_auto_capture = _start_auto_capture
+        
         # Define _refresh_queue_table function
         def _refresh_queue_table(silent: bool = False):
-            log_to_file(f"[Queue] _refresh_queue_table() called, silent={silent}")
-            # Prevent multiple simultaneous refreshes
+            # Log call with stack trace for debugging
+            import traceback
+            import inspect
+            caller_frame = inspect.currentframe().f_back
+            caller_info = f"{caller_frame.f_code.co_filename}:{caller_frame.f_lineno} in {caller_frame.f_code.co_name}"
+            log_to_file(f"[Queue] _refresh_queue_table() called, silent={silent}, caller={caller_info}")
+            
+            # Prevent multiple simultaneous refreshes (check BEFORE tree recreation)
             if hasattr(self, '_refresh_in_progress') and self._refresh_in_progress:
                 log_to_file("[Queue] Refresh already in progress, skipping...")
                 return
             log_to_file(f"[Queue] Setting _refresh_in_progress=True")
             self._refresh_in_progress = True
+            
+            # Recreate tree if switching to/from Parcel tab (different column structure)
+            try:
+                current_table = self._current_table.get()
+                is_parcel = current_table.lower() == 'parcel'
+                log_to_file(f"[Queue] Checking tree structure for table: {current_table}")
+                
+                # Check if tree has the right number of columns
+                if hasattr(self, '_queue_tree'):
+                    current_cols = self._queue_tree['columns']
+                    needs_recreation = False
+                    
+                    if is_parcel and len(current_cols) != 5:
+                        log_to_file(f"[Queue] Parcel tab needs 5 columns, currently has {len(current_cols)}")
+                        needs_recreation = True
+                    elif not is_parcel and len(current_cols) != 16:
+                        log_to_file(f"[Queue] Standard tab needs 16 columns, currently has {len(current_cols)}")
+                        needs_recreation = True
+                    
+                    if needs_recreation:
+                        log_to_file(f"[Queue] Recreating tree for: {current_table} (is_parcel={is_parcel})")
+                        self._recreate_queue_tree(is_parcel=is_parcel)
+                        log_to_file(f"[Queue] Tree recreation completed")
+                else:
+                    log_to_file(f"[Queue] No _queue_tree found")
+            except Exception as tree_err:
+                log_to_file(f"[Queue] ERROR during tree check/recreation: {tree_err}")
+                import traceback
+                log_to_file(f"[Queue] Traceback: {traceback.format_exc()}")
+                self._refresh_in_progress = False
+                return
             # If metros must load first, defer until loaded
             try:
                 if getattr(self, '_require_metros_first', False) and not getattr(self, '_metros_loaded', True):
@@ -4348,6 +7394,8 @@ class OldCompactHUD:
                         self._root.after(250, lambda: self._refresh_queue_table(silent))
                     except Exception:
                         pass
+                    # Reset flag since we're deferring to retry
+                    self._refresh_in_progress = False
                     return
             except Exception:
                 pass
@@ -4355,7 +7403,9 @@ class OldCompactHUD:
             # Capture values on main thread before starting background thread
             try:
                 current_table = self._current_table.get()
+                log_to_file(f"[Queue] Captured current_table: {current_table}")
                 current_status = self._current_status.get()
+                log_to_file(f"[Queue] Captured current_status: {current_status}")
                 try:
                     account_search = (self._accounts_search_var.get().strip() if hasattr(self, '_accounts_search_var') else "")
                 except Exception:
@@ -4371,8 +7421,10 @@ class OldCompactHUD:
                 except Exception as e:
                     log_to_file(f"[Queue] Failed to get metro: {e}")
                     selected_metro = "All"
+                log_to_file(f"[Queue] All values captured successfully")
             except Exception as e:
                 log_to_file(f"[Queue] Error getting table/status values: {e}")
+                self._refresh_in_progress = False
                 return
             
             try:
@@ -4394,12 +7446,16 @@ class OldCompactHUD:
             if not silent:
                 log_to_file("[Queue] Background fetch started")
             
+            # Initialize rows before loading (needed for tree population later)
+            rows = []
+            custom_source = None
+            
             if str(current_table).lower() == 'parcel':
-                # Parcel tab: load google_addresses where king_county_parcels_id is NULL
+                # Parcel tab: load king_county_parcels with address and metro info
                 try:
                     import mysql.connector
                     if not silent:
-                        log_to_file(f"[Parcel] Loading from google_addresses where king_county_parcels_id IS NULL...")
+                        log_to_file(f"[Parcel] Loading from king_county_parcels...")
                     
                     conn = mysql.connector.connect(
                         host='localhost',
@@ -4410,33 +7466,124 @@ class OldCompactHUD:
                         connect_timeout=10
                     )
                     cursor = conn.cursor(dictionary=True)
-                    cursor.execute("""
-                        SELECT id, place_id, building_name, 
-                               JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.formatted_address')) as formatted_address
-                        FROM google_addresses 
-                        WHERE king_county_parcels_id IS NULL 
-                        ORDER BY id DESC 
-                        LIMIT 500
-                    """)
-                    addresses = cursor.fetchall()
+                    
+                    # Get metro name and parcel_link based on selected metro
+                    # Default to Seattle if no metro selected or "All" selected
+                    metro_filter = selected_metro if selected_metro and selected_metro != 'All' else 'Seattle'
+                    
+                    # Build WHERE clause for metro filtering
+                    if metro_filter == 'All':
+                        where_clause = "WHERE kcp.Address IS NOT NULL AND kcp.Address != ''"
+                        params = []
+                    else:
+                        where_clause = "WHERE kcp.Address IS NOT NULL AND kcp.Address != '' AND mm.metro_name = %s"
+                        params = [metro_filter]
+                    
+                    # First, get statistics for the status label
+                    stats_query = """
+                        SELECT 
+                            COUNT(*) as total_addresses,
+                            SUM(CASE WHEN king_county_parcels_id IS NOT NULL THEN 1 ELSE 0 END) as with_parcel,
+                            SUM(CASE WHEN king_county_parcels_id IS NULL THEN 1 ELSE 0 END) as without_parcel
+                        FROM google_addresses ga
+                        INNER JOIN major_metros mm ON mm.id = ga.metro_id
+                        WHERE mm.metro_name = %s
+                    """
+                    cursor.execute(stats_query, [metro_filter])
+                    stats = cursor.fetchone()
+                    total_addresses = stats.get('total_addresses', 0) or 0
+                    with_parcel = stats.get('with_parcel', 0) or 0
+                    without_parcel = stats.get('without_parcel', 0) or 0
+                    log_to_file(f"[Parcel] Stats for {metro_filter}: {without_parcel} without parcel, {with_parcel} with parcel, {total_addresses} total")
+                    
+                    # Update status label with stats (on main thread)
+                    stats_text = f"📊 {without_parcel} addresses without parcel data | {with_parcel} with parcel data | {total_addresses} total"
+                    if hasattr(self, '_queue_status_label'):
+                        self._root.after(0, lambda: self._queue_status_label.config(text=stats_text))
+                    
+                    # Query google_addresses WITHOUT king_county_parcels_id (addresses that need processing)
+                    # Parse address from json_dump column - structure: {"result": {"formatted_address": "..."}}
+                    query = f"""
+                        SELECT 
+                            ga.id,
+                            COALESCE(
+                                JSON_UNQUOTE(JSON_EXTRACT(ga.json_dump, '$.result.formatted_address')),
+                                JSON_UNQUOTE(JSON_EXTRACT(ga.json_dump, '$.result.name')),
+                                JSON_UNQUOTE(JSON_EXTRACT(ga.json_dump, '$.result.vicinity')),
+                                'No address available'
+                            ) as address,
+                            mm.metro_name,
+                            mm.parcel_link,
+                            ga.json_dump
+                        FROM google_addresses ga
+                        INNER JOIN major_metros mm ON mm.id = ga.metro_id
+                        WHERE ga.king_county_parcels_id IS NULL
+                        AND ga.json_dump IS NOT NULL 
+                        AND ga.json_dump != ''
+                        AND ga.json_dump != '{{}}'
+                        AND JSON_EXTRACT(ga.json_dump, '$.result') IS NOT NULL
+                        AND mm.metro_name = %s
+                        ORDER BY ga.id DESC
+                    """
+                    
+                    cursor.execute(query, [metro_filter])
+                    parcels = cursor.fetchall()
                     cursor.close()
                     conn.close()
                     
+                    def strip_unit_display(address):
+                        """Remove unit numbers from address for display"""
+                        if not address:
+                            return address
+                        import re
+                        # Remove patterns like: #34, Unit 123, Apt A, Suite X, etc.
+                        patterns = [
+                            r'\s*#\d+.*$',  # #34 at end
+                            r'\s*Unit\s+[A-Za-z0-9]+.*$',  # Unit 123
+                            r'\s*Apt\.?\s+[A-Za-z0-9]+.*$',  # Apt A or Apt. A
+                            r'\s*Suite\s+[A-Za-z0-9]+.*$',  # Suite X
+                            r'\s*Ste\.?\s+[A-Za-z0-9]+.*$',  # Ste X
+                        ]
+                        cleaned = address
+                        for pattern in patterns:
+                            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+                        return cleaned.strip()
+                    
                     rows = []
-                    for addr in addresses:
+                    parcel_link_found = None
+                    for parcel in parcels:
+                        plink = parcel.get('parcel_link') or ''
+                        if plink and not parcel_link_found:
+                            parcel_link_found = plink
+                            log_to_file(f"[Parcel] Found parcel_link: {plink}")
+                        
+                        # Get address and log if empty
+                        address = strip_unit_display(parcel.get('address') or '')
+                        if not address:
+                            log_to_file(f"[Parcel] Row {parcel.get('id')}: No address found in query result")
+                        
                         rows.append({
-                            'id': addr.get('id'),
-                            'link': addr.get('formatted_address') or addr.get('place_id') or '',
-                            'name': addr.get('building_name') or '',
+                            'id': parcel.get('id'),
+                            'address': address,
+                            'metro_name': parcel.get('metro_name') or '',
+                            'parcel_link': plink,
+                            'json_dump': parcel.get('json_dump') or '{}',  # Include json_dump from query
                             'run_interval_minutes': 0,
                             'next_run': None,
                             'processed_at': None,
-                            'status': 'queued',
+                            'status': 'ready',
                             'steps': {}
                         })
+                    
+                    # Update parcel link label in UI
+                    if hasattr(self, '_parcel_link_label') and parcel_link_found:
+                        self._root.after(0, lambda: self._parcel_link_label.config(text=parcel_link_found))
+                    elif hasattr(self, '_parcel_link_label'):
+                        self._root.after(0, lambda: self._parcel_link_label.config(text="No parcel link available"))
+                    
                     custom_source = 'parcel'
                     if not silent:
-                        log_to_file(f"[Parcel] ✓ Loaded {len(rows)} addresses without parcel IDs")
+                        log_to_file(f"[Parcel] ✓ Loaded {len(rows)} parcel records (parcel_link: {parcel_link_found or 'None'})")
                 except Exception as e:
                     error_occurred = True
                     error_msg = f"Parcel load failed: {str(e)[:80]}"
@@ -4728,13 +7875,22 @@ class OldCompactHUD:
                     if not selected_metro:
                         selected_metro = "Seattle"
                     
-                    # Filter by metro name
+                    # Filter by metro name and COUNT apartment_listings for each google_places
                     cursor.execute("""
-                        SELECT gp.id, gp.Website, gp.Name, gp.availability_website, mm.metro_name
+                        SELECT 
+                            gp.id, 
+                            gp.Website, 
+                            gp.Name, 
+                            gp.availability_website,
+                            gp.availability_website_last_scraped,
+                            mm.metro_name,
+                            COUNT(al.id) as listing_count
                         FROM google_places gp
                         LEFT JOIN major_metros mm ON gp.major_metro_id = mm.id
+                        LEFT JOIN apartment_listings al ON al.google_places_id = gp.id
                         WHERE gp.Website IS NOT NULL AND gp.Website != '' 
                         AND mm.metro_name = %s
+                        GROUP BY gp.id, gp.Website, gp.Name, gp.availability_website, gp.availability_website_last_scraped, mm.metro_name
                         ORDER BY 
                             CASE 
                                 WHEN gp.availability_website LIKE '%http:%' OR gp.availability_website LIKE '%https:%' THEN 0 
@@ -4755,6 +7911,7 @@ class OldCompactHUD:
                             'name': gp.get('Name') or '',
                             'metro_name': gp.get('metro_name') or 'Seattle',
                             'availability_website': gp.get('availability_website') or '',
+                            'listing_count': gp.get('listing_count', 0),
                             'run_interval_minutes': 0,
                             'next_run': None,
                             'processed_at': None,
@@ -4904,6 +8061,12 @@ class OldCompactHUD:
                 for item in self._queue_tree.get_children():
                     self._queue_tree.delete(item)
                 
+                # Clear parcel data dictionaries if switching to parcel tab
+                if str(current_table).lower() == "parcel":
+                    self._parcel_json_data.clear()
+                    if hasattr(self, '_parcel_links'):
+                        self._parcel_links.clear()
+                
                 # Insert rows into tree
                 for idx, row in enumerate(rows):
                     row_id = row.get('id', '')
@@ -4933,43 +8096,139 @@ class OldCompactHUD:
                     # For Websites tab, add colored indicator based on availability_website
                     if str(current_table).lower() in ("listing_websites", "websites"):
                         avail_site = str(row.get('availability_website', '')).strip()
-                        # Debug log first few rows
+                        # Debug log first few rows and current_table
                         if idx < 3:
-                            log_to_file(f"[Queue] Row {row_id}: availability_website='{avail_site}'")
+                            log_to_file(f"[Queue] Websites Row {row_id}: current_table='{current_table}', availability_website='{avail_site}'")
                         
                         if avail_site and 'http' in avail_site.lower():
-                            # Green light for rows with availability_website containing http
-                            id_with_play = f"🟢 {row_id}"
+                            # Green checkmark for rows with availability_website containing http
+                            id_with_play = f"✅ {row_id}"
                         else:
-                            # Red light for rows without valid URL
-                            id_with_play = f"🔴 {row_id}"
+                            # Red X for rows without valid URL
+                            id_with_play = f"❌ {row_id}"
+                    elif idx < 3:
+                        # Debug: log why we're not in Websites branch
+                        log_to_file(f"[Queue] NOT Websites Row {row_id}: current_table='{current_table}' (not in listing_websites/websites)")
                     
                     # Insert into tree with zebra striping
                     tag = "even" if idx % 2 == 0 else "odd"
                     
-                    # Different column structure for Websites vs Networks vs Alerts
-                    if str(current_table).lower() in ("listing_websites", "websites"):
-                        # Websites table: ID, Link, Metro (Seattle), Avail Website (Name/Building), Int (Avail URL)
-                        # Tree columns: ID, Link, Metro, Int, Last, Next, Status, Δ$, +, -, Total, ✏️, hidden1, hidden2
+                    # Different column structure for Websites vs Networks vs Parcel vs Alerts
+                    if str(current_table).lower() == "parcel":
+                        # Parcel table: 5 columns - ID, Address, Metro, Image (Yes/No), Edit
+                        json_data = row.get('json_dump', '{}')
+                        parcel_link = row.get('parcel_link', '')
+                        
+                        # Get address - if empty, try to parse from json_dump
+                        address = row.get('address', '') or ''
+                        if not address and json_data and json_data != '{}':
+                            try:
+                                import json
+                                data = json.loads(json_data) if isinstance(json_data, str) else json_data
+                                # Structure: {"result": {"formatted_address": "..."}}
+                                result = data.get('result', {})
+                                address = (result.get('formatted_address', '') or 
+                                          result.get('name', '') or 
+                                          result.get('vicinity', ''))
+                            except:
+                                address = ''
+                        
+                        # Check if parcels_{id}.png or parcels_{id}_processed.png or skipped marker exists
+                        from pathlib import Path
+                        parcels_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels")
+                        image_file = parcels_dir / f"parcels_{row_id}.png"
+                        processed_file = parcels_dir / f"parcels_{row_id}_processed.png"
+                        skipped_file = parcels_dir / f"parcels_{row_id}_skipped.txt"
+                        
+                        if processed_file.exists():
+                            image_status = "✅ Done"
+                        elif image_file.exists():
+                            image_status = "📷 Has Image"  # Changed to indicate image exists (won't be captured again)
+                        elif skipped_file.exists():
+                            image_status = "⏭️ Skipped"
+                        else:
+                            image_status = "❌ No"
+                        
+                        # Add row number to ID
+                        row_number = idx + 1
+                        id_display = f"{row_number}. {row_id}"
+                        
                         item_id = self._queue_tree.insert("", "end", values=(
+                            id_display,                        # ID column with row number
+                            address,                           # Address column
+                            row.get('metro_name', ''),         # Metro column
+                            image_status,                      # Image column (Yes/No/Done)
+                            "✏️"                               # Edit button
+                        ), tags=(tag,))
+                        
+                        # Store JSON data and parcel_link separately in dictionary
+                        self._parcel_json_data[item_id] = json_data
+                        if parcel_link:
+                            # Store link in a separate dictionary
+                            if not hasattr(self, '_parcel_links'):
+                                self._parcel_links = {}
+                            self._parcel_links[item_id] = parcel_link
+                    elif str(current_table).lower() in ("listing_websites", "websites"):
+                        # Websites table: #, ID, Link, Metro, Name, Avail Website, Last Scraped, Play, Edit
+                        # Tree columns: #, ID, Link, Metro, Name, Avail Website, Last Scraped, Status, Δ$, +, -, Total, ▶️, ✏️, hidden1, hidden2
+                        row_number = idx + 1
+                        avail_website = row.get('availability_website', '')
+                        # Truncate availability_website for display (show first 40 chars)
+                        avail_display = avail_website[:40] + '...' if len(avail_website) > 40 else avail_website
+                        
+                        # Format last scraped timestamp as relative time
+                        last_scraped = row.get('availability_website_last_scraped', '')
+                        if last_scraped:
+                            from datetime import datetime, timedelta
+                            try:
+                                if isinstance(last_scraped, str):
+                                    dt = datetime.strptime(last_scraped, '%Y-%m-%d %H:%M:%S')
+                                else:
+                                    dt = last_scraped
+                                
+                                # Calculate relative time
+                                now = datetime.now()
+                                diff = now - dt
+                                
+                                if diff.days > 0:
+                                    last_scraped_display = f"{diff.days}d ago"
+                                elif diff.seconds >= 3600:
+                                    hours = diff.seconds // 3600
+                                    last_scraped_display = f"{hours}h ago"
+                                elif diff.seconds >= 60:
+                                    minutes = diff.seconds // 60
+                                    last_scraped_display = f"{minutes}m ago"
+                                else:
+                                    last_scraped_display = "just now"
+                            except:
+                                last_scraped_display = str(last_scraped)[:16]
+                        else:
+                            last_scraped_display = ''
+                        
+                        # Show link icon instead of full URL
+                        link_display = "🔗" if link else ""
+                        
+                        item_id = self._queue_tree.insert("", "end", values=(
+                            str(row_number),                     # Row counter (1, 2, 3...)
                             id_with_play,                        # ID with colored indicator
-                            link,                                # Link (Website URL)
+                            link_display,                        # Link (icon instead of URL)
                             row.get('metro_name', 'Seattle'),   # Metro (Seattle from major_metros)
-                            row.get('name', ''),                 # Int column (shows Building Name for Websites tab)
-                            "",                                  # Last (empty/unused)
-                            "",                                  # Next (empty/unused)
+                            row.get('name', ''),                 # Name (Building Name)
+                            avail_display,                       # Avail Website (visible column)
+                            last_scraped_display,                # Last Scraped (formatted timestamp)
                             "",                                  # Status (empty/unused)
                             "",                                  # Δ$ (empty for websites)
                             "",                                  # + (empty for websites)
                             "",                                  # - (empty for websites)
                             "",                                  # Total (empty for websites)
+                            "▶️",                               # Play button
                             "✏️",                               # Edit button
-                            row.get('availability_website', ''), # hidden1 (stores availability_website for Activity Window check)
-                            ""                                   # hidden2
+                            avail_website,                       # hidden1 (stores full availability_website for Activity Window check)
+                            link                                 # hidden2 (stores full Website URL)
                         ), tags=(tag,))
                     else:
-                        # Networks table: Must provide 14 values to match tree column count
-                        # Tree columns: ID, Link, Metro, Int, Last, Next, Status, Δ$, +, -, Total, ✏️, hidden1, hidden2
+                        # Networks table: Must provide 16 values to match tree column count
+                        # Tree columns: ID, Link, Metro, Int, Last, Next, Status, Δ$, +, -, Total, ▶️, ✏️, hidden1, hidden2, hidden3
                         item_id = self._queue_tree.insert("", "end", values=(
                             id_with_play,    # ID with play button
                             link,            # Link
@@ -4982,9 +8241,11 @@ class OldCompactHUD:
                             added,           # +
                             removed,         # -
                             total,           # Total
+                            "",              # Play button (empty for Networks)
                             "✏️",           # Edit button
                             "",              # hidden1
-                            ""               # hidden2
+                            "",              # hidden2
+                            ""               # hidden3
                         ), tags=(tag,))
                     
                     # Store error message in tooltip dictionary if exists
@@ -4997,6 +8258,32 @@ class OldCompactHUD:
                 
                 if not silent:
                     log_to_file(f"[Queue] ✓ Tree populated successfully")
+                
+                # For Parcel tab: Count unprocessed images and update status
+                if str(current_table).lower() == "parcel":
+                    try:
+                        from pathlib import Path
+                        parcels_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels")
+                        if parcels_dir.exists():
+                            # Count unprocessed images (parcels_*.png but not *_processed.png)
+                            all_images = list(parcels_dir.glob("parcels_*.png"))
+                            unprocessed = [img for img in all_images if not img.stem.endswith('_processed')]
+                            processed = [img for img in all_images if img.stem.endswith('_processed')]
+                            
+                            unprocessed_count = len(unprocessed)
+                            processed_count = len(processed)
+                            
+                            # Update status label with image counts
+                            status_text = f"📊 {len(rows)} addresses without parcel | 📷 {unprocessed_count} images ready"
+                            if unprocessed_count >= 20:
+                                status_text += f" | ✅ Ready to run OpenAI batch!"
+                            
+                            if hasattr(self, '_queue_status_label'):
+                                self._root.after(0, lambda t=status_text: self._queue_status_label.config(text=t))
+                            
+                            log_to_file(f"[Parcel] Image count: {unprocessed_count} unprocessed, {processed_count} processed")
+                    except Exception as img_err:
+                        log_to_file(f"[Parcel] Failed to count images: {img_err}")
                 
             except Exception as e:
                 log_to_file(f"[Queue] ERROR populating tree: {e}")
@@ -5030,9 +8317,9 @@ class OldCompactHUD:
                 counts = {'queued': 0, 'running': 0, 'done': 0, 'error': 0}
                 table = current_table  # Use captured value
                 
-                # SKIP API call for Networks tab - data loads directly from database
-                if str(current_table).lower() in ("queue_websites", "listing_websites", "websites"):
-                    log_to_file(f"[Queue] Skipping API count fetch for Networks tab (loads from DB)")
+                # SKIP API call for Networks/Parcel tabs - data loads directly from database
+                if str(current_table).lower() in ("queue_websites", "listing_websites", "websites", "parcel"):
+                    log_to_file(f"[Queue] Skipping API count fetch for {current_table} tab (loads from DB)")
                     self._counts_refresh_in_progress = False
                     return
                 
@@ -5895,6 +9182,184 @@ class OldCompactHUD:
                 from datetime import datetime
                 import mysql.connector
                 
+                # Create menu window to choose sync type
+                menu_win = tk.Toplevel(root)
+                menu_win.title("Database Sync Options")
+                menu_win.geometry("400x450")
+                menu_win.transient(root)
+                menu_win.grab_set()
+                menu_win.resizable(False, False)
+                
+                # Center window on screen
+                menu_win.update_idletasks()
+                screen_width = menu_win.winfo_screenwidth()
+                screen_height = menu_win.winfo_screenheight()
+                x = (screen_width // 2) - (400 // 2)
+                y = (screen_height // 2) - (450 // 2)
+                menu_win.geometry(f"400x450+{x}+{y}")
+                
+                # Header
+                header = tk.Frame(menu_win, bg="#2C3E50", height=70)
+                header.pack(fill="x")
+                header.pack_propagate(False)
+                
+                tk.Label(
+                    header,
+                    text="🔄 Database Sync Options",
+                    font=("Segoe UI", 14, "bold"),
+                    bg="#2C3E50",
+                    fg="white"
+                ).pack(pady=20)
+                
+                # Content
+                content = tk.Frame(menu_win, bg="white")
+                content.pack(fill="both", expand=True, padx=20, pady=20)
+                
+                tk.Label(
+                    content,
+                    text="Choose sync operation:",
+                    font=("Segoe UI", 10),
+                    bg="white",
+                    fg="#2C3E50"
+                ).pack(pady=(0, 15))
+                
+                def open_db_sync():
+                    menu_win.destroy()
+                    _perform_db_sync()
+                
+                def open_911_sync():
+                    menu_win.destroy()
+                    _perform_911_sync()
+                
+                def open_code_sync():
+                    menu_win.destroy()
+                    _perform_code_sync()
+                
+                # Button 1: Sync DB
+                btn1 = tk.Button(
+                    content,
+                    text="🔄 Sync DB",
+                    command=open_db_sync,
+                    bg="#16A085",
+                    fg="white",
+                    font=("Segoe UI", 11, "bold"),
+                    padx=20,
+                    pady=15,
+                    cursor="hand2",
+                    relief="flat"
+                )
+                btn1.pack(fill="x", pady=5)
+                
+                tk.Label(
+                    content,
+                    text="Sync apartment listings & network data",
+                    font=("Segoe UI", 8),
+                    bg="white",
+                    fg="#7F8C8D"
+                ).pack(pady=(0, 10))
+                
+                # Get 911 sync stats
+                try:
+                    import mysql.connector
+                    conn_temp = mysql.connector.connect(
+                        host='127.0.0.1',
+                        user='root',
+                        password='',
+                        database='offta'
+                    )
+                    cursor_temp = conn_temp.cursor(dictionary=True)
+                    
+                    # Count unsynced addresses
+                    cursor_temp.execute("""
+                        SELECT COUNT(*) as count 
+                        FROM google_addresses 
+                        WHERE (911_json IS NULL OR 911_json = '') 
+                        AND latitude IS NOT NULL 
+                        AND longitude IS NOT NULL
+                    """)
+                    result = cursor_temp.fetchone()
+                    unsynced_911 = result['count'] if result else 0
+                    
+                    # Get last sync date
+                    cursor_temp.execute("""
+                        SELECT last_sync_date, records_processed 
+                        FROM sync_metadata 
+                        WHERE sync_type = '911_calls'
+                    """)
+                    sync_info = cursor_temp.fetchone()
+                    last_sync_911 = sync_info['last_sync_date'].strftime('%m/%d %I:%M%p') if sync_info and sync_info['last_sync_date'] else 'Never'
+                    
+                    cursor_temp.close()
+                    conn_temp.close()
+                except Exception as e:
+                    unsynced_911 = '?'
+                    last_sync_911 = '?'
+                    log_to_file(f"[Sync Menu] Error getting 911 stats: {e}")
+                
+                # Button 2: Sync 911
+                btn2_text = f"🚨 Sync 911 Data ({unsynced_911} unsynced)"
+                btn2 = tk.Button(
+                    content,
+                    text=btn2_text,
+                    command=open_911_sync,
+                    bg="#E74C3C",
+                    fg="white",
+                    font=("Segoe UI", 11, "bold"),
+                    padx=20,
+                    pady=15,
+                    cursor="hand2",
+                    relief="flat"
+                )
+                btn2.pack(fill="x", pady=5)
+                
+                tk.Label(
+                    content,
+                    text=f"Match 911 calls to addresses • Last: {last_sync_911}",
+                    font=("Segoe UI", 8),
+                    bg="white",
+                    fg="#7F8C8D"
+                ).pack(pady=(0, 10))
+                
+                # Button 3: Sync Code
+                btn3 = tk.Button(
+                    content,
+                    text="⚠️ Sync Code Violations",
+                    command=open_code_sync,
+                    bg="#F39C12",
+                    fg="white",
+                    font=("Segoe UI", 11, "bold"),
+                    padx=20,
+                    pady=15,
+                    cursor="hand2",
+                    relief="flat"
+                )
+                btn3.pack(fill="x", pady=5)
+                
+                tk.Label(
+                    content,
+                    text="Match code violations to addresses",
+                    font=("Segoe UI", 8),
+                    bg="white",
+                    fg="#7F8C8D"
+                ).pack(pady=(0, 10))
+                
+                return  # Exit early, subfunctions will be called
+                
+            except Exception as ex:
+                log_to_file(f"[Sync] Sync button handler error: {ex}")
+                log_exception("Sync button handler error")
+                print(f"[Sync] Sync button handler error: {ex}")
+        
+        def _perform_db_sync():
+            """Original DB sync functionality"""
+            try:
+                from tkinter import messagebox, ttk
+                import subprocess
+                import tempfile
+                import os
+                from datetime import datetime
+                import mysql.connector
+                
                 # MySQL tools paths (XAMPP)
                 mysqldump_path = r"C:\xampp\mysql\bin\mysqldump.exe"
                 mysql_path = r"C:\xampp\mysql\bin\mysql.exe"
@@ -6278,6 +9743,13 @@ class OldCompactHUD:
                         """)
                         
                         dependencies = [row[0] for row in dep_cursor.fetchall()]
+                        
+                        # Add apartment_listing_price_changes when syncing apartment_listings
+                        if table_name == 'apartment_listings':
+                            if 'apartment_listing_price_changes' not in dependencies:
+                                dependencies.append('apartment_listing_price_changes')
+                                log_to_file(f"[Sync] Added apartment_listing_price_changes as dependency of apartment_listings")
+                        
                         dep_cursor.close()
                         dep_conn.close()
                         
@@ -6285,6 +9757,9 @@ class OldCompactHUD:
                         return dependencies + [table_name]
                     except:
                         # If we can't get dependencies, just return the table
+                        # Still add price_changes for apartment_listings
+                        if table_name == 'apartment_listings':
+                            return ['apartment_listing_price_changes', table_name]
                         return [table_name]
                 
                 # Function to sync single table
@@ -6618,6 +10093,232 @@ class OldCompactHUD:
                     log_text.tag_config(level, foreground=colors.get(level, "#2C3E50"))
                     log_text.see("end")
                     compare_win.update()
+                
+                # Tab 3: Expenses - Track API usage
+                expenses_tab = tk.Frame(notebook, bg="white")
+                notebook.add(expenses_tab, text="💰 Expenses")
+                
+                # Create expenses display
+                expenses_canvas = tk.Canvas(expenses_tab, bg="white")
+                expenses_scrollbar = ttk.Scrollbar(expenses_tab, orient="vertical", command=expenses_canvas.yview)
+                expenses_scrollable = tk.Frame(expenses_canvas, bg="white")
+                
+                expenses_scrollable.bind(
+                    "<Configure>",
+                    lambda e: expenses_canvas.configure(scrollregion=expenses_canvas.bbox("all"))
+                )
+                
+                expenses_canvas.create_window((0, 0), window=expenses_scrollable, anchor="nw")
+                expenses_canvas.configure(yscrollcommand=expenses_scrollbar.set)
+                
+                # Summary section
+                summary_frame = tk.Frame(expenses_scrollable, bg="#ECF0F1", relief="ridge", bd=2)
+                summary_frame.pack(fill="x", padx=10, pady=10)
+                
+                tk.Label(summary_frame, text="API Usage Summary", bg="#ECF0F1", fg="#2C3E50",
+                        font=("Segoe UI", 11, "bold")).pack(pady=(10, 5))
+                
+                # Pricing constants (as of 2025)
+                OPENAI_PRICING = {
+                    "gpt-4-vision-preview": {"input": 0.01 / 1000, "output": 0.03 / 1000},  # per token
+                    "gpt-4": {"input": 0.03 / 1000, "output": 0.06 / 1000},
+                    "gpt-3.5-turbo": {"input": 0.0005 / 1000, "output": 0.0015 / 1000},
+                }
+                GOOGLE_PRICING = {
+                    "places_details": 0.017,  # per call
+                    "geocoding": 0.005,  # per call
+                    "places_search": 0.032,  # per call
+                }
+                
+                # Stats labels
+                stats_container = tk.Frame(summary_frame, bg="#ECF0F1")
+                stats_container.pack(pady=5, padx=20)
+                
+                openai_stats_label = tk.Label(stats_container, text="OpenAI: Loading...", bg="#ECF0F1", fg="#2C3E50",
+                                             font=("Segoe UI", 10), anchor="w")
+                openai_stats_label.grid(row=0, column=0, sticky="w", padx=10, pady=3)
+                
+                google_stats_label = tk.Label(stats_container, text="Google: Loading...", bg="#ECF0F1", fg="#2C3E50",
+                                             font=("Segoe UI", 10), anchor="w")
+                google_stats_label.grid(row=1, column=0, sticky="w", padx=10, pady=3)
+                
+                total_stats_label = tk.Label(stats_container, text="Total: Loading...", bg="#ECF0F1", fg="#27AE60",
+                                            font=("Segoe UI", 11, "bold"), anchor="w")
+                total_stats_label.grid(row=2, column=0, sticky="w", padx=10, pady=(10, 5))
+                
+                # Detailed logs section
+                details_frame = tk.Frame(expenses_scrollable, bg="white")
+                details_frame.pack(fill="both", expand=True, padx=10, pady=5)
+                
+                tk.Label(details_frame, text="Recent API Calls", bg="white", fg="#2C3E50",
+                        font=("Segoe UI", 10, "bold")).pack(pady=5)
+                
+                # Header for API calls table
+                header_frame = tk.Frame(details_frame, bg="#34495E", relief="flat")
+                header_frame.pack(fill="x", pady=(0, 2))
+                
+                tk.Label(header_frame, text="Date/Time", bg="#34495E", fg="white",
+                        font=("Segoe UI", 9, "bold"), width=20, anchor="w").pack(side="left", padx=5, pady=5)
+                tk.Label(header_frame, text="Service", bg="#34495E", fg="white",
+                        font=("Segoe UI", 9, "bold"), width=12, anchor="w").pack(side="left", padx=5, pady=5)
+                tk.Label(header_frame, text="Endpoint", bg="#34495E", fg="white",
+                        font=("Segoe UI", 9, "bold"), width=20, anchor="w").pack(side="left", padx=5, pady=5)
+                tk.Label(header_frame, text="Tokens/Calls", bg="#34495E", fg="white",
+                        font=("Segoe UI", 9, "bold"), width=12, anchor="center").pack(side="left", padx=5, pady=5)
+                tk.Label(header_frame, text="Cost", bg="#34495E", fg="white",
+                        font=("Segoe UI", 9, "bold"), width=10, anchor="e").pack(side="left", padx=5, pady=5)
+                
+                # Scrollable API calls list
+                calls_list_frame = tk.Frame(details_frame, bg="white")
+                calls_list_frame.pack(fill="both", expand=True)
+                
+                def load_expenses_data():
+                    """Load and display API usage data from database"""
+                    try:
+                        # Connect to database
+                        conn = mysql.connector.connect(
+                            host="localhost",
+                            user="root",
+                            password="",
+                            database="offta"
+                        )
+                        cursor = conn.cursor(dictionary=True)
+                        
+                        # Ensure api_calls table exists
+                        cursor.execute("""
+                            CREATE TABLE IF NOT EXISTS api_calls (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                service VARCHAR(50) NOT NULL,
+                                endpoint VARCHAR(100) NOT NULL,
+                                call_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                tokens_used INT DEFAULT 0,
+                                calls_count INT DEFAULT 1,
+                                input_tokens INT DEFAULT 0,
+                                output_tokens INT DEFAULT 0,
+                                model VARCHAR(50),
+                                cost_usd DECIMAL(10, 6) DEFAULT 0,
+                                metadata TEXT,
+                                INDEX idx_service (service),
+                                INDEX idx_call_time (call_time)
+                            )
+                        """)
+                        conn.commit()
+                        
+                        # Get summary stats
+                        cursor.execute("""
+                            SELECT 
+                                service,
+                                COUNT(*) as total_calls,
+                                SUM(tokens_used) as total_tokens,
+                                SUM(calls_count) as api_calls,
+                                SUM(cost_usd) as total_cost
+                            FROM api_calls
+                            GROUP BY service
+                        """)
+                        
+                        summary_data = cursor.fetchall()
+                        
+                        openai_cost = 0
+                        openai_calls = 0
+                        google_cost = 0
+                        google_calls = 0
+                        
+                        for row in summary_data:
+                            if row['service'] == 'openai':
+                                openai_cost = float(row['total_cost'] or 0)
+                                openai_calls = int(row['total_calls'] or 0)
+                            elif row['service'] == 'google':
+                                google_cost = float(row['total_cost'] or 0)
+                                google_calls = int(row['api_calls'] or 0)
+                        
+                        total_cost = openai_cost + google_cost
+                        
+                        # Update summary labels
+                        openai_stats_label.config(
+                            text=f"OpenAI API: {openai_calls:,} calls | ${openai_cost:.4f} USD"
+                        )
+                        google_stats_label.config(
+                            text=f"Google API: {google_calls:,} calls | ${google_cost:.4f} USD"
+                        )
+                        total_stats_label.config(
+                            text=f"Total Cost: ${total_cost:.4f} USD"
+                        )
+                        
+                        # Get recent API calls (last 100)
+                        cursor.execute("""
+                            SELECT 
+                                service,
+                                endpoint,
+                                call_time,
+                                tokens_used,
+                                calls_count,
+                                cost_usd,
+                                model
+                            FROM api_calls
+                            ORDER BY call_time DESC
+                            LIMIT 100
+                        """)
+                        
+                        recent_calls = cursor.fetchall()
+                        
+                        # Clear existing calls list
+                        for widget in calls_list_frame.winfo_children():
+                            widget.destroy()
+                        
+                        # Display recent calls
+                        if recent_calls:
+                            for idx, call in enumerate(recent_calls):
+                                row_bg = "#F8F9FA" if idx % 2 == 0 else "white"
+                                
+                                call_frame = tk.Frame(calls_list_frame, bg=row_bg, relief="flat")
+                                call_frame.pack(fill="x", pady=1)
+                                
+                                # Format timestamp
+                                call_time = call['call_time'].strftime("%Y-%m-%d %H:%M:%S")
+                                
+                                tk.Label(call_frame, text=call_time, bg=row_bg, fg="#2C3E50",
+                                        font=("Segoe UI", 8), width=20, anchor="w").pack(side="left", padx=5, pady=2)
+                                
+                                service_color = "#E67E22" if call['service'] == 'openai' else "#3498DB"
+                                tk.Label(call_frame, text=call['service'].upper(), bg=row_bg, fg=service_color,
+                                        font=("Segoe UI", 8, "bold"), width=12, anchor="w").pack(side="left", padx=5, pady=2)
+                                
+                                endpoint_text = call['endpoint'][:25] + "..." if len(call['endpoint']) > 25 else call['endpoint']
+                                tk.Label(call_frame, text=endpoint_text, bg=row_bg, fg="#2C3E50",
+                                        font=("Segoe UI", 8), width=20, anchor="w").pack(side="left", padx=5, pady=2)
+                                
+                                # Show tokens for OpenAI, calls count for Google
+                                usage_text = f"{call['tokens_used']:,} tokens" if call['service'] == 'openai' else f"{call['calls_count']} calls"
+                                tk.Label(call_frame, text=usage_text, bg=row_bg, fg="#7F8C8D",
+                                        font=("Segoe UI", 8), width=12, anchor="center").pack(side="left", padx=5, pady=2)
+                                
+                                cost_color = "#27AE60" if call['cost_usd'] < 0.01 else "#E67E22"
+                                tk.Label(call_frame, text=f"${float(call['cost_usd']):.4f}", bg=row_bg, fg=cost_color,
+                                        font=("Segoe UI", 8, "bold"), width=10, anchor="e").pack(side="left", padx=5, pady=2)
+                        else:
+                            tk.Label(calls_list_frame, text="No API calls recorded yet", bg="white", fg="#95A5A6",
+                                    font=("Segoe UI", 10, "italic")).pack(pady=20)
+                        
+                        cursor.close()
+                        conn.close()
+                        
+                    except Exception as e:
+                        openai_stats_label.config(text=f"Error loading data: {str(e)}")
+                        log_to_file(f"[Expenses] Error loading API data: {e}")
+                
+                expenses_canvas.pack(side="left", fill="both", expand=True)
+                expenses_scrollbar.pack(side="right", fill="y")
+                
+                # Refresh button
+                refresh_btn_frame = tk.Frame(expenses_scrollable, bg="white")
+                refresh_btn_frame.pack(pady=10)
+                
+                tk.Button(refresh_btn_frame, text="🔄 Refresh Data", bg="#3498DB", fg="white",
+                         font=("Segoe UI", 9, "bold"), padx=15, pady=5, cursor="hand2",
+                         command=load_expenses_data).pack()
+                
+                # Load initial data
+                load_expenses_data()
                 
                 # Log initial info
                 log_status(f"Database comparison complete", "info")
@@ -7073,7 +10774,515 @@ class OldCompactHUD:
                 log_to_file(f"[Sync] Sync button handler error: {ex}")
                 log_exception("Sync button handler error")
                 print(f"[Sync] Sync button handler error: {ex}")
+        
+        def _perform_911_sync():
+            """Sync 911 calls to google_addresses with distance-based matching"""
+            try:
+                from tkinter import messagebox, ttk
+                import mysql.connector
+                import json
+                import math
+                
+                log_to_file("[911 Sync] Starting 911 data sync...")
+                
+                # Create sync window
+                sync_win = tk.Toplevel(root)
+                sync_win.title("911 Data Sync")
+                sync_win.geometry("700x500")
+                sync_win.transient(root)
+                sync_win.resizable(True, True)
+                
+                # Header
+                header = tk.Frame(sync_win, bg="#E74C3C", height=70)
+                header.pack(fill="x")
+                header.pack_propagate(False)
+                
+                tk.Label(
+                    header,
+                    text="🚨 911 Data Sync",
+                    font=("Segoe UI", 14, "bold"),
+                    bg="#E74C3C",
+                    fg="white"
+                ).pack(pady=20)
+                
+                # Status
+                status_frame = tk.Frame(sync_win, bg="white")
+                status_frame.pack(fill="x", padx=20, pady=15)
+                
+                status_label = tk.Label(
+                    status_frame,
+                    text="Initializing...",
+                    font=("Segoe UI", 10),
+                    bg="white",
+                    fg="#2C3E50"
+                )
+                status_label.pack()
+                
+                progress_bar = ttk.Progressbar(status_frame, mode='indeterminate', length=450)
+                progress_bar.pack(pady=10)
+                progress_bar.start(10)
+                
+                # Log area
+                log_frame = tk.Frame(sync_win, bg="white")
+                log_frame.pack(fill="both", expand=True, padx=20, pady=10)
+                
+                log_text = tk.Text(log_frame, bg="#2C3E50", fg="#ECF0F1", font=("Consolas", 9), height=15)
+                log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=log_text.yview)
+                log_text.config(yscrollcommand=log_scroll.set)
+                log_text.pack(side="left", fill="both", expand=True)
+                log_scroll.pack(side="right", fill="y")
+                
+                def log_sync(msg):
+                    log_text.insert("end", f"{msg}\n")
+                    log_text.see("end")
+                    sync_win.update()
+                
+                # Close button (initially disabled)
+                close_btn = tk.Button(
+                    sync_win,
+                    text="Close",
+                    command=sync_win.destroy,
+                    bg="#95A5A6",
+                    fg="white",
+                    font=("Segoe UI", 10, "bold"),
+                    padx=20,
+                    pady=8,
+                    cursor="hand2",
+                    state="disabled"
+                )
+                close_btn.pack(pady=15)
+                
+                sync_win.update()
+                
+                # Haversine distance calculator
+                def haversine_distance(lat1, lon1, lat2, lon2):
+                    """Calculate distance between two points in feet"""
+                    R = 20902231  # Earth's radius in feet (6371 km * 3280.84)
+                    
+                    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+                    dlat = lat2 - lat1
+                    dlon = lon2 - lon1
+                    
+                    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+                    c = 2 * math.asin(math.sqrt(a))
+                    return R * c
+                
+                # Perform sync
+                try:
+                    log_sync("=" * 60)
+                    log_sync("Connecting to database...")
+                    
+                    conn = mysql.connector.connect(
+                        host="localhost",
+                        user="root",
+                        password="",
+                        database="offta"
+                    )
+                    cursor = conn.cursor(dictionary=True)
+                    
+                    # Ensure 911_json column exists
+                    log_sync("Checking google_addresses table structure...")
+                    cursor.execute("""
+                        ALTER TABLE google_addresses 
+                        ADD COLUMN IF NOT EXISTS 911_json JSON DEFAULT NULL
+                    """)
+                    conn.commit()
+                    
+                    # Get all addresses with lat/long
+                    log_sync("Fetching addresses from google_addresses...")
+                    cursor.execute("""
+                        SELECT 
+                            id,
+                            latitude,
+                            longitude,
+                            COALESCE(
+                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.formatted_address')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.name')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.vicinity')),
+                                'No address'
+                            ) as address
+                        FROM google_addresses
+                        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+                    """)
+                    addresses = cursor.fetchall()
+                    log_sync(f"Found {len(addresses)} addresses with coordinates")
+                    
+                    # Get all 911 calls
+                    log_sync("Fetching 911 calls...")
+                    try:
+                        cursor.execute("""
+                            SELECT cad_event_number, dispatch_latitude, dispatch_longitude, 
+                                   cad_event_clearance_description, event_datetime
+                            FROM 911_calls_city_1
+                            WHERE dispatch_latitude IS NOT NULL AND dispatch_longitude IS NOT NULL
+                        """)
+                        calls_911 = cursor.fetchall()
+                        log_sync(f"Found {len(calls_911)} 911 calls with coordinates")
+                    except mysql.connector.Error as e:
+                        log_sync(f"Warning: Could not fetch 911 calls table: {e}")
+                        log_sync("Please ensure you have a table with 911 call data")
+                        calls_911 = []
+                    
+                    if not calls_911:
+                        log_sync("No 911 calls found. Sync aborted.")
+                        status_label.config(text="No 911 data available", fg="#E74C3C")
+                        progress_bar.stop()
+                        close_btn.config(state="normal")
+                        return
+                    
+                    # Process each address
+                    status_label.config(text="Matching 911 calls to addresses...")
+                    progress_bar.config(mode='determinate', maximum=len(addresses))
+                    progress_bar['value'] = 0
+                    
+                    distances = [5000, 3000, 2000, 1000, 500]  # feet
+                    processed = 0
+                    
+                    for addr in addresses:
+                        addr_lat = float(addr['latitude'])
+                        addr_lon = float(addr['longitude'])
+                        
+                        # Find calls within each distance
+                        results_by_distance = {}
+                        for dist in distances:
+                            results_by_distance[f"{dist}ft"] = []
+                        
+                        for call in calls_911:
+                            call_lat = float(call['dispatch_latitude'])
+                            call_lon = float(call['dispatch_longitude'])
+                            
+                            distance = haversine_distance(addr_lat, addr_lon, call_lat, call_lon)
+                            
+                            # Add to appropriate distance buckets (store only IDs)
+                            for dist in distances:
+                                if distance <= dist:
+                                    results_by_distance[f"{dist}ft"].append(call.get('cad_event_number'))
+                        
+                        # Create JSON with just event IDs
+                        json_data = {
+                            'total_calls': len(set([c for calls in results_by_distance.values() for c in calls])),
+                            'by_distance': {}
+                        }
+                        
+                        for dist_key, event_ids in results_by_distance.items():
+                            unique_ids = list(set(event_ids))  # Remove duplicates
+                            json_data['by_distance'][dist_key] = {
+                                'count': len(unique_ids),
+                                'event_ids': unique_ids
+                            }
+                        
+                        # Update database
+                        cursor.execute("""
+                            UPDATE google_addresses
+                            SET 911_json = %s
+                            WHERE id = %s
+                        """, (json.dumps(json_data), addr['id']))
+                        
+                        processed += 1
+                        if processed % 10 == 0:
+                            conn.commit()
+                            progress_bar['value'] = processed
+                            log_sync(f"Processed {processed}/{len(addresses)} addresses...")
+                            sync_win.update()
+                    
+                    conn.commit()
+                    
+                    # Record sync completion time
+                    try:
+                        cursor.execute("""
+                            CREATE TABLE IF NOT EXISTS sync_metadata (
+                                sync_type VARCHAR(50) PRIMARY KEY,
+                                last_sync_date DATETIME,
+                                records_processed INT
+                            )
+                        """)
+                        cursor.execute("""
+                            INSERT INTO sync_metadata (sync_type, last_sync_date, records_processed)
+                            VALUES ('911_calls', NOW(), %s)
+                            ON DUPLICATE KEY UPDATE 
+                                last_sync_date = NOW(),
+                                records_processed = %s
+                        """, (processed, processed))
+                        conn.commit()
+                        log_sync(f"✓ Recorded sync completion time")
+                    except Exception as e:
+                        log_sync(f"Warning: Could not record sync time: {e}")
+                    
+                    cursor.close()
+                    conn.close()
+                    
+                    log_sync("=" * 60)
+                    log_sync(f"✓ Successfully processed {processed} addresses")
+                    log_sync(f"✓ 911 data sync complete!")
+                    
+                    status_label.config(text="✓ Sync complete!", fg="#27AE60")
+                    progress_bar.stop()
+                    progress_bar['value'] = progress_bar['maximum']
+                    close_btn.config(state="normal")
+                    
+                except Exception as e:
+                    log_sync(f"✗ Error: {e}")
+                    log_sync(f"✗ Sync failed!")
+                    status_label.config(text="✗ Sync failed", fg="#E74C3C")
+                    progress_bar.stop()
+                    close_btn.config(state="normal")
+                    
+            except Exception as ex:
+                log_to_file(f"[911 Sync] Error: {ex}")
+                messagebox.showerror("911 Sync Error", f"Failed to sync 911 data:\n\n{ex}", parent=root)
+        
+        def _perform_code_sync():
+            """Sync code violations to google_addresses with address/coordinate matching"""
+            try:
+                from tkinter import messagebox, ttk
+                import mysql.connector
+                import json
+                import math
+                
+                log_to_file("[Code Sync] Starting code violations sync...")
+                
+                # Create sync window
+                sync_win = tk.Toplevel(root)
+                sync_win.title("Code Violations Sync")
+                sync_win.geometry("700x500")
+                sync_win.transient(root)
+                sync_win.resizable(True, True)
+                
+                # Header
+                header = tk.Frame(sync_win, bg="#F39C12", height=70)
+                header.pack(fill="x")
+                header.pack_propagate(False)
+                
+                tk.Label(
+                    header,
+                    text="⚠️ Code Violations Sync",
+                    font=("Segoe UI", 14, "bold"),
+                    bg="#F39C12",
+                    fg="white"
+                ).pack(pady=20)
+                
+                # Status
+                status_frame = tk.Frame(sync_win, bg="white")
+                status_frame.pack(fill="x", padx=20, pady=15)
+                
+                status_label = tk.Label(
+                    status_frame,
+                    text="Initializing...",
+                    font=("Segoe UI", 10),
+                    bg="white",
+                    fg="#2C3E50"
+                )
+                status_label.pack()
+                
+                progress_bar = ttk.Progressbar(status_frame, mode='indeterminate', length=450)
+                progress_bar.pack(pady=10)
+                progress_bar.start(10)
+                
+                # Log area
+                log_frame = tk.Frame(sync_win, bg="white")
+                log_frame.pack(fill="both", expand=True, padx=20, pady=10)
+                
+                log_text = tk.Text(log_frame, bg="#2C3E50", fg="#ECF0F1", font=("Consolas", 9), height=15)
+                log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=log_text.yview)
+                log_text.config(yscrollcommand=log_scroll.set)
+                log_text.pack(side="left", fill="both", expand=True)
+                log_scroll.pack(side="right", fill="y")
+                
+                def log_sync(msg):
+                    log_text.insert("end", f"{msg}\n")
+                    log_text.see("end")
+                    sync_win.update()
+                
+                # Close button
+                close_btn = tk.Button(
+                    sync_win,
+                    text="Close",
+                    command=sync_win.destroy,
+                    bg="#95A5A6",
+                    fg="white",
+                    font=("Segoe UI", 10, "bold"),
+                    padx=20,
+                    pady=8,
+                    cursor="hand2",
+                    state="disabled"
+                )
+                close_btn.pack(pady=15)
+                
+                sync_win.update()
+                
+                # Perform sync
+                try:
+                    log_sync("=" * 60)
+                    log_sync("Connecting to database...")
+                    
+                    conn = mysql.connector.connect(
+                        host="localhost",
+                        user="root",
+                        password="",
+                        database="offta"
+                    )
+                    cursor = conn.cursor(dictionary=True)
+                    
+                    # Ensure code_json column exists
+                    log_sync("Checking google_addresses table structure...")
+                    cursor.execute("""
+                        ALTER TABLE google_addresses 
+                        ADD COLUMN IF NOT EXISTS code_json JSON DEFAULT NULL
+                    """)
+                    conn.commit()
+                    
+                    # Get all addresses
+                    log_sync("Fetching addresses from google_addresses...")
+                    cursor.execute("""
+                        SELECT 
+                            id,
+                            latitude,
+                            longitude,
+                            COALESCE(
+                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.formatted_address')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.name')),
+                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.vicinity')),
+                                'No address'
+                            ) as address
+                        FROM google_addresses
+                        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+                    """)
+                    addresses = cursor.fetchall()
+                    log_sync(f"Found {len(addresses)} addresses")
+                    
+                    # Get all code violations from code_data_city_1
+                    log_sync("Fetching code violations...")
+                    try:
+                        cursor.execute("""
+                            SELECT RecordNum, Latitude, Longitude, OriginalAddress1, 
+                                   RecordTypeMapped, OpenDate, StatusCurrent, Description
+                            FROM code_data_city_1
+                            WHERE Latitude IS NOT NULL AND Longitude IS NOT NULL
+                        """)
+                        violations = cursor.fetchall()
+                        log_sync(f"Found {len(violations)} code violations")
+                    except mysql.connector.Error as e:
+                        log_sync(f"Warning: Could not fetch code_data_city_1 table: {e}")
+                        log_sync("Please ensure you have code violations data")
+                        violations = []
+                    
+                    if not violations:
+                        log_sync("No code violations found. Sync aborted.")
+                        status_label.config(text="No code violation data available", fg="#E74C3C")
+                        progress_bar.stop()
+                        close_btn.config(state="normal")
+                        return
+                    
+                    # Process each address
+                    status_label.config(text="Matching code violations to addresses...")
+                    progress_bar.config(mode='determinate', maximum=len(addresses))
+                    progress_bar['value'] = 0
+                    
+                    processed = 0
+                    
+                    for addr in addresses:
+                        matched_violations = []
+                        
+                        # Match by exact address or lat/long
+                        for violation in violations:
+                            matched = False
+                            
+                            # Try address matching
+                            if addr.get('address') and violation.get('OriginalAddress1'):
+                                addr_normalized = addr['address'].lower().strip()
+                                viol_normalized = violation['OriginalAddress1'].lower().strip()
+                                if addr_normalized == viol_normalized:
+                                    matched = True
+                            
+                            # Try coordinate matching (within ~30 feet)
+                            if not matched and addr.get('latitude') and addr.get('longitude'):
+                                if violation.get('Latitude') and violation.get('Longitude'):
+                                    lat_diff = abs(float(addr['latitude']) - float(violation['Latitude']))
+                                    lon_diff = abs(float(addr['longitude']) - float(violation['Longitude']))
+                                    if lat_diff < 0.0001 and lon_diff < 0.0001:  # ~30 feet
+                                        matched = True
+                            
+                            if matched:
+                                matched_violations.append(violation.get('RecordNum'))
+                        
+                        # Create JSON with just record IDs
+                        json_data = {
+                            'total_violations': len(matched_violations),
+                            'record_ids': matched_violations
+                        }
+                        
+                        # Update database
+                        cursor.execute("""
+                            UPDATE google_addresses
+                            SET code_json = %s
+                            WHERE id = %s
+                        """, (json.dumps(json_data), addr['id']))
+                        
+                        processed += 1
+                        if processed % 10 == 0:
+                            conn.commit()
+                            progress_bar['value'] = processed
+                            log_sync(f"Processed {processed}/{len(addresses)} addresses...")
+                            sync_win.update()
+                    
+                    conn.commit()
+                    
+                    # Record sync completion time
+                    try:
+                        cursor.execute("""
+                            CREATE TABLE IF NOT EXISTS sync_metadata (
+                                sync_type VARCHAR(50) PRIMARY KEY,
+                                last_sync_date DATETIME,
+                                records_processed INT
+                            )
+                        """)
+                        cursor.execute("""
+                            INSERT INTO sync_metadata (sync_type, last_sync_date, records_processed)
+                            VALUES ('code_violations', NOW(), %s)
+                            ON DUPLICATE KEY UPDATE 
+                                last_sync_date = NOW(),
+                                records_processed = %s
+                        """, (processed, processed))
+                        conn.commit()
+                        log_sync(f"✓ Recorded sync completion time")
+                    except Exception as e:
+                        log_sync(f"Warning: Could not record sync time: {e}")
+                    
+                    cursor.close()
+                    conn.close()
+                    
+                    log_sync("=" * 60)
+                    log_sync(f"✓ Successfully processed {processed} addresses")
+                    log_sync(f"✓ Code violations sync complete!")
+                    
+                    status_label.config(text="✓ Sync complete!", fg="#27AE60")
+                    progress_bar.stop()
+                    progress_bar['value'] = progress_bar['maximum']
+                    close_btn.config(state="normal")
+                    
+                except Exception as e:
+                    log_sync(f"✗ Error: {e}")
+                    log_sync(f"✗ Sync failed!")
+                    status_label.config(text="✗ Sync failed", fg="#E74C3C")
+                    progress_bar.stop()
+                    close_btn.config(state="normal")
+                    
+            except Exception as ex:
+                log_to_file(f"[Code Sync] Error: {ex}")
+                messagebox.showerror("Code Sync Error", f"Failed to sync code violations:\n\n{ex}", parent=root)
+        
         sync_btn.bind("<Button-1>", _on_sync_btn)
+        
+        # Expenses button handler
+        def _on_expenses_btn(e):
+            try:
+                log_to_file("[Expenses] Button clicked")
+                self.show_expenses_window()
+            except Exception as ex:
+                log_to_file(f"[Expenses] Button handler error: {ex}")
+                log_exception("Expenses button handler error")
+                print(f"[Expenses] Button handler error: {ex}")
+        expenses_btn.bind("<Button-1>", _on_expenses_btn)
         
         # Last 3 log messages at the bottom of the window
         last_box = tk.Frame(body, bg=bg)
@@ -8787,32 +12996,36 @@ class OldCompactHUD:
             log_to_file(f"[Queue] Looking for job {job_id_str} in cache...")
             log_to_file(f"[Queue] Cache keys: {list(self._job_data_cache.keys())}")
             
+            job = None
+            link = ''
+            the_css = ''
+            
             if job_id_str in self._job_data_cache:
                 job = self._job_data_cache[job_id_str]
                 log_to_file(f"[Queue] ✓ Found job in cache")
+                link = job.get('link', '')
+                the_css = job.get('the_css', '')
             else:
-                # Fallback: try to get from API
-                log_to_file(f"[Queue] ✗ Job not in cache, fetching from API...")
-                api_url = f"https://api.trustyhousing.com/manual_upload/queue_website_api.php?table={table}&status=all&limit=1000"
-                response = requests.get(api_url, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                
-                if isinstance(data, dict):
-                    job_data = data.get('data', [])
-                    # Find the specific job by ID
-                    job = None
-                    for j in job_data:
-                        if str(j.get('id')) == job_id_str:
-                            job = j
-                            break
-                    if not job:
-                        raise Exception(f"Job {job_id} not found in API response")
-                else:
-                    raise Exception("Invalid API response")
-            
-            link = job.get('link', '')
-            the_css = job.get('the_css', '')
+                # Fallback: try to get from API (optional)
+                try:
+                    log_to_file(f"[Queue] ✗ Job not in cache, fetching from API...")
+                    api_url = f"https://api.trustyhousing.com/manual_upload/queue_website_api.php?table={table}&status=all&limit=1000"
+                    response = requests.get(api_url, timeout=10)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    if isinstance(data, dict):
+                        job_data = data.get('data', [])
+                        # Find the specific job by ID
+                        for j in job_data:
+                            if str(j.get('id')) == job_id_str:
+                                job = j
+                                link = job.get('link', '')
+                                the_css = job.get('the_css', '')
+                                break
+                except Exception as api_err:
+                    log_to_file(f"[Queue] ⚠️ API fetch failed (continuing anyway): {api_err}")
+                    # Continue without API data - some steps don't need it
             
             log_to_file(f"[Queue] Job details:")
             log_to_file(f"[Queue]   - Link: {link}")
@@ -8838,7 +13051,8 @@ class OldCompactHUD:
                 
             elif step == "manual_match":
                 # Step 3: Manual match (includes image extraction and upload)
-                result = self._step_manual_match(job_id, link)
+                # Link not needed - function finds JSON by job_id
+                result = self._step_manual_match(job_id, None)
                 
             elif step == "process_db":
                 # Step 4: Process JSON and insert into DB
@@ -9816,128 +14030,144 @@ class OldCompactHUD:
         """Step 3: Download images - extracts and downloads all images from listings"""
         log_to_file(f"[Queue] ========== DOWNLOAD IMAGES START ==========")
         log_to_file(f"[Queue] Downloading images for job {job_id}")
+        log_to_file(f"[Queue] Link parameter: {link}")
         print(f"[3.IMAGE] Starting image download for job {job_id}")
         
         date_str = datetime.now().strftime("%Y-%m-%d")
         html_dir = BASE_DIR / date_str
+        log_to_file(f"[Queue] Date string: {date_str}")
+        log_to_file(f"[Queue] Base HTML dir: {html_dir}")
+        log_to_file(f"[Queue] BASE_DIR value: {BASE_DIR}")
         
-        # Find JSON file
-        json_file = None
-        for f in html_dir.glob(f"*_{job_id}.json"):
-            json_file = f
-            break
+        # Find JSON file in Networks subfolder
+        json_file = html_dir / "Networks" / f"networks_{job_id}.json"
+        log_to_file(f"[Queue] Looking for JSON file: {json_file}")
+        log_to_file(f"[Queue] JSON file exists: {json_file.exists()}")
         
-        if not json_file or not json_file.exists():
-            raise Exception("JSON file not found - run Step 2 first")
+        if not json_file.exists():
+            log_to_file(f"[Queue] ❌ JSON file not found!")
+            log_to_file(f"[Queue] Checking parent directory...")
+            parent_exists = (html_dir / "Networks").exists()
+            log_to_file(f"[Queue] Networks folder exists: {parent_exists}")
+            if parent_exists:
+                files_in_networks = list((html_dir / "Networks").iterdir())
+                log_to_file(f"[Queue] Files in Networks folder: {[f.name for f in files_in_networks]}")
+            raise Exception(f"JSON file not found: {json_file}")
         
-        log_to_file(f"[Queue] Found JSON file: {json_file}")
+        log_to_file(f"[Queue] ✓ Found JSON file: {json_file}")
+        log_to_file(f"[Queue] JSON file size: {json_file.stat().st_size} bytes")
         print(f"[3.IMAGE] JSON file: {json_file.name}")
         
         # Read the JSON data
+        log_to_file(f"[Queue] Opening JSON file for reading...")
         with open(json_file, 'r', encoding='utf-8') as f:
-            json_data = json.load(f)
+            listings = json.load(f)
+        log_to_file(f"[Queue] ✓ JSON loaded successfully")
+        log_to_file(f"[Queue] JSON type: {type(listings)}")
         
-        # Handle different JSON structures
-        if isinstance(json_data, list):
-            listings = json_data
-        elif isinstance(json_data, dict):
-            if 'data' in json_data:
-                listings = json_data['data']
-            elif 'listings' in json_data:
-                listings = json_data['listings']
-            else:
-                listings = [json_data]
-        else:
-            raise Exception(f"Unexpected JSON type: {type(json_data)}")
+        if not isinstance(listings, list):
+            log_to_file(f"[Queue] ❌ JSON is not a list!")
+            raise Exception("JSON must be a list of listings")
         
         total_listings = len(listings)
-        log_to_file(f"[Queue] Found {total_listings} listings with images")
+        log_to_file(f"[Queue] ✓ Found {total_listings} listings in JSON")
         print(f"[3.IMAGE] Found {total_listings} listings")
         
-        def _update_status(msg):
-            self._root.after(0, lambda: self._queue_status_label.config(text=msg))
-        
-        _update_status(f"📥 Downloading images from {total_listings} listings...")
-        
-        # Create images folder: networks_{job_id}
-        images_dir = html_dir / f"networks_{job_id}"
-        images_dir.mkdir(exist_ok=True)
-        log_to_file(f"[Queue] Images folder: {images_dir}")
-        print(f"[3.IMAGE] Output folder: {images_dir.name}")
+        # Save images directly to Networks thumbnails folder
+        images_dir = Path(os.path.dirname(__file__)) / "Captures" / "thumbnails" / "Networks"
+        log_to_file(f"[Queue] Target images directory: {images_dir}")
+        log_to_file(f"[Queue] Creating images directory if needed...")
+        images_dir.mkdir(parents=True, exist_ok=True)
+        log_to_file(f"[Queue] ✓ Images directory ready")
+        log_to_file(f"[Queue] Images directory exists: {images_dir.exists()}")
+        print(f"[3.IMAGE] Output folder: {images_dir}")
         
         # Download images
         downloaded = 0
         skipped = 0
         failed = 0
         
+        log_to_file(f"[Queue] Starting download loop for {total_listings} listings...")
+        
         for idx, listing in enumerate(listings, 1):
+            log_to_file(f"[Queue] Processing listing {idx}/{total_listings}")
+            
             if not isinstance(listing, dict):
+                log_to_file(f"[Queue] ⚠️ Listing {idx} is not a dict, skipping")
                 continue
             
-            listing_id = listing.get('listing_id', f'unknown_{idx}')
-            img_urls = listing.get('img_urls', '')
+            # Get listing_id as unique identifier
+            listing_id = listing.get('listing_id', '').strip()
+            log_to_file(f"[Queue] Listing {idx}: ID = {listing_id}")
             
-            if not img_urls:
+            if not listing_id:
+                log_to_file(f"[Queue] ⚠️ Listing {idx} has no listing_id, skipping")
                 skipped += 1
                 continue
             
-            # Parse URLs (can be comma-separated)
-            if isinstance(img_urls, str):
-                urls = [url.strip() for url in img_urls.split(',') if url.strip()]
-            elif isinstance(img_urls, list):
-                urls = img_urls
-            else:
-                urls = [str(img_urls)]
+            # Get image URL
+            img_url = listing.get('img_urls', '').strip()
+            log_to_file(f"[Queue] Listing {idx}: Image URL = {img_url[:100] if img_url else 'None'}...")
             
-            log_to_file(f"[Queue] [{idx}/{total_listings}] Listing {listing_id}: {len(urls)} image(s)")
+            if not img_url:
+                log_to_file(f"[Queue] ⚠️ Listing {idx} has no img_urls, skipping")
+                skipped += 1
+                continue
             
-            # Download each image
-            for img_idx, url in enumerate(urls, 1):
-                try:
-                    # Get file extension
-                    parsed_url = urlparse(url)
-                    ext = os.path.splitext(parsed_url.path)[1]
-                    if not ext or ext.lower() not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-                        ext = '.jpg'
-                    
-                    # Create unique filename
-                    if len(urls) > 1:
-                        filename = f"{listing_id}_{img_idx}{ext}"
-                    else:
-                        filename = f"{listing_id}{ext}"
-                    
-                    save_path = images_dir / filename
-                    
-                    # Skip if exists
-                    if save_path.exists():
-                        skipped += 1
-                        continue
-                    
-                    # Download
-                    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                    response = requests.get(url, headers=headers, timeout=30, stream=True)
-                    response.raise_for_status()
-                    
-                    with open(save_path, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                    
-                    file_size = save_path.stat().st_size
-                    log_to_file(f"[Queue] ✓ Downloaded: {filename} ({file_size:,} bytes)")
-                    downloaded += 1
-                    
-                    # Update UI every 5 images
-                    if downloaded % 5 == 0:
-                        _update_status(f"📥 Downloaded {downloaded} images...")
-                    
-                    time.sleep(0.2)  # Small delay
-                    
-                except Exception as img_err:
-                    log_to_file(f"[Queue] ✗ Failed to download {url}: {img_err}")
-                    failed += 1
+            # Use only first URL if comma-separated
+            if ',' in img_url:
+                original_url = img_url
+                img_url = img_url.split(',')[0].strip()
+                log_to_file(f"[Queue] Multiple URLs found, using first: {img_url}")
+            
+            # Create filename: listing_id.png
+            filename = f"{listing_id}.png"
+            save_path = images_dir / filename
+            log_to_file(f"[Queue] Target file path: {save_path}")
+            
+            # Skip if exists and has content
+            if save_path.exists():
+                file_size = save_path.stat().st_size
+                if file_size > 0:
+                    log_to_file(f"[Queue] ⏭️ File already exists ({file_size:,} bytes), skipping: {filename}")
+                    skipped += 1
+                    continue
+                else:
+                    log_to_file(f"[Queue] ⚠️ File exists but is 0 bytes, will re-download: {filename}")
+            
+            # Download
+            try:
+                log_to_file(f"[Queue] 📥 Downloading: {img_url}")
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                response = requests.get(img_url, headers=headers, timeout=30, stream=True)
+                log_to_file(f"[Queue] Response status: {response.status_code}")
+                response.raise_for_status()
+                
+                log_to_file(f"[Queue] Writing to file: {save_path}")
+                with open(save_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                file_size = save_path.stat().st_size
+                log_to_file(f"[Queue] ✅ Downloaded: {filename} ({file_size:,} bytes)")
+                print(f"[3.IMAGE] ✓ {filename}")
+                downloaded += 1
+                
+            except Exception as img_err:
+                log_to_file(f"[Queue] ❌ Failed to download {img_url}: {img_err}")
+                log_exception(f"Image download error for {listing_id}")
+                print(f"[3.IMAGE] ✗ Failed: {listing_id} - {img_err}")
+                failed += 1
         
         log_to_file(f"[Queue] ========== DOWNLOAD IMAGES COMPLETE ==========")
         log_to_file(f"[Queue] Downloaded: {downloaded}, Skipped: {skipped}, Failed: {failed}")
+        log_to_file(f"[Queue] Images saved to: {images_dir}")
+        log_to_file(f"[Queue] Verifying images directory contents...")
+        if images_dir.exists():
+            actual_files = list(images_dir.glob("*.png"))
+            log_to_file(f"[Queue] Actual PNG files in directory: {len(actual_files)}")
+            if len(actual_files) > 0:
+                log_to_file(f"[Queue] Sample files: {[f.name for f in actual_files[:5]]}")
         print(f"[3.IMAGE] ✅ Downloaded: {downloaded}, Skipped: {skipped}, Failed: {failed}")
         
         return f"✅ Downloaded {downloaded} images (skipped {skipped}, failed {failed})"
@@ -9948,24 +14178,36 @@ class OldCompactHUD:
         log_to_file(f"[Queue] Uploading images for job {job_id}")
         print(f"[4.DB] Starting image upload for job {job_id}")
         
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        html_dir = BASE_DIR / date_str
-        
-        # Find images folder created in Step 3
-        images_dir = html_dir / f"networks_{job_id}"
+        # Get images from Networks thumbnails folder
+        images_dir = Path(os.path.dirname(__file__)) / "Captures" / "thumbnails" / "Networks"
+        log_to_file(f"[Queue] Images directory: {images_dir}")
+        log_to_file(f"[Queue] __file__ value: {os.path.dirname(__file__)}")
+        log_to_file(f"[Queue] Images directory exists: {images_dir.exists()}")
         
         if not images_dir.exists():
+            log_to_file(f"[Queue] ❌ Images folder not found!")
             raise Exception("Images folder not found - run Step 3 first")
         
+        log_to_file(f"[Queue] ✓ Images directory found")
+        
         # Get list of image files
+        log_to_file(f"[Queue] Searching for image files...")
         image_files = []
         for ext in ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.webp']:
-            image_files.extend(list(images_dir.glob(ext)))
+            found = list(images_dir.glob(ext))
+            log_to_file(f"[Queue] Found {len(found)} files matching {ext}")
+            image_files.extend(found)
         
         total_images = len(image_files)
+        log_to_file(f"[Queue] Total images found: {total_images}")
         
         if total_images == 0:
-            raise Exception("No images found in folder - run Step 3 first")
+            log_to_file(f"[Queue] ❌ No images found!")
+            log_to_file(f"[Queue] Listing directory contents...")
+            if images_dir.exists():
+                all_files = list(images_dir.iterdir())
+                log_to_file(f"[Queue] All files in directory: {[f.name for f in all_files[:10]]}")
+            raise Exception("No images found - run Step 3 first")
         
         log_to_file(f"[Queue] Found {total_images} images to upload")
         print(f"[4.DB] Found {total_images} images to upload")
@@ -10209,20 +14451,28 @@ class OldCompactHUD:
         log_to_file(f"[Queue] Uploading images for job {job_id}")
         print(f"[4.DB] Starting image upload for job {job_id}")
         
-        # Use thumbnails folder instead of date-based folder
-        thumbnails_dir = BASE_DIR / "thumbnails"
+        # Use Networks thumbnails folder
+        thumbnails_dir = Path(os.path.dirname(__file__)) / "Captures" / "thumbnails" / "Networks"
+        log_to_file(f"[Queue] Images directory: {thumbnails_dir}")
         
         if not thumbnails_dir.exists():
+            log_to_file(f"[Queue] ❌ Images folder not found!")
             raise Exception("Thumbnails folder not found - run Step 3 first")
+        
+        log_to_file(f"[Queue] ✓ Images directory found")
         
         # Get list of image files
         image_files = []
         for ext in ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.webp']:
-            image_files.extend(list(thumbnails_dir.glob(ext)))
+            found = list(thumbnails_dir.glob(ext))
+            log_to_file(f"[Queue] Found {len(found)} files matching {ext}")
+            image_files.extend(found)
         
         total_images = len(image_files)
+        log_to_file(f"[Queue] Total images found: {total_images}")
         
         if total_images == 0:
+            log_to_file(f"[Queue] ❌ No images found!")
             raise Exception("No images found in folder - run Step 3 first")
         
         log_to_file(f"[Queue] Found {total_images} images to upload")
@@ -10397,6 +14647,294 @@ class OldCompactHUD:
                 self._loader.pack_forget()
         except Exception:
             pass
+
+    def show_expenses_window(self):
+        """Show API expenses tracking window"""
+        import tkinter as tk
+        from tkinter import ttk
+        import mysql.connector
+        
+        # Create expenses window
+        expenses_win = tk.Toplevel(self._root)
+        expenses_win.title("API Expenses Tracker")
+        expenses_win.geometry("900x700")
+        expenses_win.configure(bg="white")
+        
+        # Make it modal
+        expenses_win.transient(self._root)
+        expenses_win.grab_set()
+        
+        # Header
+        header = tk.Frame(expenses_win, bg="#34495E", height=50)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        
+        tk.Label(header, text="💰 API Expenses Tracker", bg="#34495E", fg="white",
+                font=("Segoe UI", 14, "bold")).pack(side="left", padx=20, pady=10)
+        
+        # Close button
+        close_btn = tk.Label(header, text="✕", fg="white", bg="#34495E",
+                           font=("Segoe UI", 16), cursor="hand2", padx=10)
+        close_btn.pack(side="right", padx=10)
+        close_btn.bind("<Button-1>", lambda e: expenses_win.destroy())
+        close_btn.bind("<Enter>", lambda e: close_btn.config(bg="#E74C3C"))
+        close_btn.bind("<Leave>", lambda e: close_btn.config(bg="#34495E"))
+        
+        # Main content
+        content = tk.Frame(expenses_win, bg="white")
+        content.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Summary section
+        summary_frame = tk.Frame(content, bg="#ECF0F1", relief="ridge", bd=2)
+        summary_frame.pack(fill="x", pady=(0, 10))
+        
+        tk.Label(summary_frame, text="API Usage Summary", bg="#ECF0F1", fg="#2C3E50",
+                font=("Segoe UI", 11, "bold")).pack(pady=(10, 5))
+        
+        stats_container = tk.Frame(summary_frame, bg="#ECF0F1")
+        stats_container.pack(pady=5, padx=20)
+        
+        openai_stats_label = tk.Label(stats_container, text="OpenAI: Loading...", bg="#ECF0F1",
+                                      fg="#2C3E50", font=("Segoe UI", 10), anchor="w")
+        openai_stats_label.grid(row=0, column=0, sticky="w", padx=10, pady=3)
+        
+        google_stats_label = tk.Label(stats_container, text="Google: Loading...", bg="#ECF0F1",
+                                      fg="#2C3E50", font=("Segoe UI", 10), anchor="w")
+        google_stats_label.grid(row=1, column=0, sticky="w", padx=10, pady=3)
+        
+        total_stats_label = tk.Label(stats_container, text="Total: Loading...", bg="#ECF0F1",
+                                     fg="#27AE60", font=("Segoe UI", 11, "bold"), anchor="w")
+        total_stats_label.grid(row=2, column=0, sticky="w", padx=10, pady=(10, 5))
+        
+        # Recent calls section
+        calls_frame = tk.Frame(content, bg="white")
+        calls_frame.pack(fill="both", expand=True)
+        
+        tk.Label(calls_frame, text="Recent API Calls", bg="white", fg="#2C3E50",
+                font=("Segoe UI", 10, "bold")).pack(pady=(0, 5))
+        
+        # Create scrollable frame for calls
+        calls_canvas = tk.Canvas(calls_frame, bg="white")
+        calls_scrollbar = ttk.Scrollbar(calls_frame, orient="vertical", command=calls_canvas.yview)
+        calls_scrollable = tk.Frame(calls_canvas, bg="white")
+        
+        calls_scrollable.bind("<Configure>",
+                             lambda e: calls_canvas.configure(scrollregion=calls_canvas.bbox("all")))
+        
+        calls_canvas.create_window((0, 0), window=calls_scrollable, anchor="nw")
+        calls_canvas.configure(yscrollcommand=calls_scrollbar.set)
+        
+        # Header for calls table
+        header_frame = tk.Frame(calls_scrollable, bg="#34495E")
+        header_frame.pack(fill="x", pady=(0, 2))
+        
+        tk.Label(header_frame, text="Date/Time", bg="#34495E", fg="white",
+                font=("Segoe UI", 9, "bold"), width=20, anchor="w").pack(side="left", padx=5, pady=5)
+        tk.Label(header_frame, text="Service", bg="#34495E", fg="white",
+                font=("Segoe UI", 9, "bold"), width=12, anchor="w").pack(side="left", padx=5, pady=5)
+        tk.Label(header_frame, text="Endpoint", bg="#34495E", fg="white",
+                font=("Segoe UI", 9, "bold"), width=25, anchor="w").pack(side="left", padx=5, pady=5)
+        tk.Label(header_frame, text="Usage", bg="#34495E", fg="white",
+                font=("Segoe UI", 9, "bold"), width=15, anchor="center").pack(side="left", padx=5, pady=5)
+        tk.Label(header_frame, text="Cost", bg="#34495E", fg="white",
+                font=("Segoe UI", 9, "bold"), width=10, anchor="e").pack(side="left", padx=5, pady=5)
+        
+        # List container
+        list_container = tk.Frame(calls_scrollable, bg="white")
+        list_container.pack(fill="both", expand=True)
+        
+        def load_expenses():
+            """Load and display expenses data from existing tables"""
+            try:
+                conn = mysql.connector.connect(
+                    host="localhost",
+                    user="root",
+                    password="",
+                    database="offta"
+                )
+                cursor = conn.cursor(dictionary=True)
+                
+                # Get OpenAI costs from openai_api_costs table
+                openai_cost = 0
+                openai_calls = 0
+                try:
+                    cursor.execute("""
+                        SELECT 
+                            COUNT(*) as total_calls,
+                            SUM(num_images) as total_images,
+                            SUM(total_cost) as total_cost
+                        FROM openai_api_costs
+                    """)
+                    row = cursor.fetchone()
+                    if row and row['total_calls']:
+                        openai_cost = float(row['total_cost'] or 0)
+                        openai_calls = int(row['total_calls'] or 0)
+                except Exception as e:
+                    log_to_file(f"[Expenses] OpenAI table error: {e}")
+                
+                # Get Google API calls from api_call_log table
+                google_calls = 0
+                google_cost = 0
+                try:
+                    cursor.execute("""
+                        SELECT 
+                            COUNT(*) as total_calls,
+                            endpoint
+                        FROM api_call_log
+                        GROUP BY endpoint
+                    """)
+                    google_rows = cursor.fetchall()
+                    
+                    # Pricing per call type
+                    pricing = {
+                        'places_details': 0.017,
+                        'places': 0.017,
+                        'geocode': 0.005,
+                        'geocoding': 0.005,
+                        'places_search': 0.032
+                    }
+                    
+                    for row in google_rows:
+                        count = int(row['total_calls'] or 0)
+                        endpoint = (row['endpoint'] or '').lower()
+                        
+                        # Match endpoint to pricing
+                        cost_per_call = 0.01  # default
+                        for key, price in pricing.items():
+                            if key in endpoint:
+                                cost_per_call = price
+                                break
+                        
+                        google_calls += count
+                        google_cost += count * cost_per_call
+                        
+                except Exception as e:
+                    log_to_file(f"[Expenses] Google table error: {e}")
+                
+                total_cost = openai_cost + google_cost
+                
+                openai_stats_label.config(text=f"OpenAI API: {openai_calls:,} batches | ${openai_cost:.4f} USD")
+                google_stats_label.config(text=f"Google API: {google_calls:,} calls | ${google_cost:.4f} USD")
+                total_stats_label.config(text=f"Total Cost: ${total_cost:.4f} USD")
+                
+                # Get recent calls - combine both tables
+                recent_calls = []
+                
+                # Get OpenAI calls
+                try:
+                    cursor.execute("""
+                        SELECT 
+                            date, time, num_images, cost_per_image, total_cost, model
+                        FROM openai_api_costs
+                        ORDER BY time DESC
+                        LIMIT 50
+                    """)
+                    for row in cursor.fetchall():
+                        recent_calls.append({
+                            'service': 'openai',
+                            'time': row['time'],
+                            'endpoint': row['model'] or 'gpt-4o',
+                            'usage': f"{row['num_images']} images",
+                            'cost': float(row['total_cost'] or 0)
+                        })
+                except Exception as e:
+                    log_to_file(f"[Expenses] Error loading OpenAI recent: {e}")
+                
+                # Get Google calls
+                try:
+                    cursor.execute("""
+                        SELECT 
+                            created_at, endpoint, status, address
+                        FROM api_call_log
+                        ORDER BY created_at DESC
+                        LIMIT 50
+                    """)
+                    
+                    pricing = {
+                        'places_details': 0.017,
+                        'places': 0.017,
+                        'geocode': 0.005,
+                        'geocoding': 0.005,
+                        'places_search': 0.032
+                    }
+                    
+                    for row in cursor.fetchall():
+                        endpoint = (row['endpoint'] or 'unknown').lower()
+                        cost_per_call = 0.01
+                        for key, price in pricing.items():
+                            if key in endpoint:
+                                cost_per_call = price
+                                break
+                        
+                        recent_calls.append({
+                            'service': 'google',
+                            'time': row['created_at'],
+                            'endpoint': row['endpoint'] or 'unknown',
+                            'usage': f"{row['status'] or 'OK'}",
+                            'cost': cost_per_call
+                        })
+                except Exception as e:
+                    log_to_file(f"[Expenses] Error loading Google recent: {e}")
+                
+                # Sort by time desc
+                recent_calls.sort(key=lambda x: x['time'], reverse=True)
+                recent_calls = recent_calls[:100]  # Limit to 100
+                
+                # Clear existing
+                for widget in list_container.winfo_children():
+                    widget.destroy()
+                
+                if recent_calls:
+                    for idx, call in enumerate(recent_calls):
+                        row_bg = "#F8F9FA" if idx % 2 == 0 else "white"
+                        
+                        row = tk.Frame(list_container, bg=row_bg)
+                        row.pack(fill="x", pady=1)
+                        
+                        call_time = call['time'].strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        tk.Label(row, text=call_time, bg=row_bg, fg="#2C3E50",
+                                font=("Segoe UI", 8), width=20, anchor="w").pack(side="left", padx=5, pady=2)
+                        
+                        service_color = "#E67E22" if call['service'] == 'openai' else "#3498DB"
+                        tk.Label(row, text=call['service'].upper(), bg=row_bg, fg=service_color,
+                                font=("Segoe UI", 8, "bold"), width=12, anchor="w").pack(side="left", padx=5, pady=2)
+                        
+                        endpoint = call['endpoint'][:25] + "..." if len(call['endpoint']) > 25 else call['endpoint']
+                        tk.Label(row, text=endpoint, bg=row_bg, fg="#2C3E50",
+                                font=("Segoe UI", 8), width=25, anchor="w").pack(side="left", padx=5, pady=2)
+                        
+                        tk.Label(row, text=call['usage'], bg=row_bg, fg="#7F8C8D",
+                                font=("Segoe UI", 8), width=15, anchor="center").pack(side="left", padx=5, pady=2)
+                        
+                        cost_color = "#27AE60" if call['cost'] < 0.01 else "#E67E22"
+                        tk.Label(row, text=f"${call['cost']:.4f}", bg=row_bg, fg=cost_color,
+                                font=("Segoe UI", 8, "bold"), width=10, anchor="e").pack(side="left", padx=5, pady=2)
+                else:
+                    tk.Label(list_container, text="No API calls recorded yet", bg="white",
+                            fg="#95A5A6", font=("Segoe UI", 10, "italic")).pack(pady=20)
+                
+                cursor.close()
+                conn.close()
+                
+            except Exception as e:
+                openai_stats_label.config(text=f"Error: {str(e)[:50]}")
+                log_to_file(f"[Expenses] Load error: {e}")
+        
+        calls_canvas.pack(side="left", fill="both", expand=True)
+        calls_scrollbar.pack(side="right", fill="y")
+        
+        # Refresh button
+        btn_frame = tk.Frame(content, bg="white")
+        btn_frame.pack(pady=10)
+        
+        refresh_btn = tk.Button(btn_frame, text="🔄 Refresh", bg="#3498DB", fg="white",
+                               font=("Segoe UI", 9, "bold"), padx=15, pady=5,
+                               cursor="hand2", relief="flat", command=load_expenses)
+        refresh_btn.pack()
+        
+        # Load initial data
+        load_expenses()
 
     def mainloop(self):
         try:

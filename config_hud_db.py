@@ -5,6 +5,16 @@ Database operations for HUD
 Split from config_hud.py
 """
 
+# Database configuration - used by parcel automation
+DB_CONFIG = {
+    'host': 'localhost',
+    'port': 3306,
+    'user': 'root',
+    'password': '',
+    'database': 'offta'
+}
+
+
 def update_db_status(network_id, status, error_msg=None):
     """Update network status in database with optional error message"""
     try:
@@ -37,3 +47,4 @@ def update_db_status(network_id, status, error_msg=None):
         conn.close()
     except Exception as e:
         print(f"DB update error: {e}")
+

@@ -1,0 +1,15 @@
+    def process_parcel_images_batch(self):
+        import os
+        from pathlib import Path
+        parcels_dir = Path('Captures/parcels')
+        all_images = list(parcels_dir.glob('parcels_*.png'))
+        unprocessed = [img for img in all_images if not img.stem.endswith('_processed')]
+        if not unprocessed:
+            self.log_activity('No unprocessed parcel images found')
+            return
+        method = self.extraction_method.get()
+        self.log_activity(f'Found {len(unprocessed)} unprocessed images')
+        if method == 'openai':
+            self.process_with_openai_batch(unprocessed)
+        else:
+            self.log_activity('BeautifulSoup processing not yet implemented')

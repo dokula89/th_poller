@@ -155,6 +155,9 @@ $GOOGLE_API_KEY = getenv('GOOGLE_API_KEY') ?: 'AIzaSyDEej4ev5Yg1NvKKZhedRAY6RRpJ
 
 dbg('API key '.($GOOGLE_API_KEY ? 'present' : 'missing'));
 
+// Include API tracking
+require_once __DIR__ . '/track_api_usage.php';
+
 //////////////////////
 // ACTION HANDLER: sync_place_ids
 // Match google_places.Place_Id to google_addresses.place_id using google_addresses_id reference
@@ -310,6 +313,19 @@ if (isset($_GET['action']) && $_GET['action'] === 'fill_ga_json') {
   dbg('Calling Places Details (FULL): '.preg_replace('~key=[^&]+~','key=REDACTED',$url));
   $detailsJson = http_get_json($url);
   dbg('Places Details status='.( $detailsJson['status'] ?? 'null'));
+  
+  // Track API usage
+  if (($detailsJson['status'] ?? '') === 'OK') {
+    try {
+      log_google_api_call($mysqli, 'places_details', 1, [
+        'place_id' => $place_id,
+        'ga_id' => $ga_id
+      ]);
+    } catch (Exception $e) {
+      error_log("[API Track] Failed to log Places Details call: " . $e->getMessage());
+    }
+  }
+  
   if (!$detailsJson) {
     out_json([
       'ok'=>false,
@@ -1067,6 +1083,15 @@ function fail($msg, $code = 400) {
   out_json(['ok' => false, 'error' => $msg], $code);
 }
 
+function ok($result_data, $final_ids = []) {
+  $response = [
+    'ok' => true,
+    'result' => $result_data,
+    'final_ids' => $final_ids
+  ];
+  out_json($response);
+}
+
 /**
  * Normalize addresses for loose matching:
  * - lowercase, trim
@@ -1550,6 +1575,7 @@ function db_insert_google_addresses(mysqli $db, string $place_id, string $src, ?
 //////////////////////
 $address = isset($_GET['address']) ? trim((string)$_GET['address']) : '';
 $place_id_hint = isset($_GET['place_id']) ? trim((string)$_GET['place_id']) : '';
+$existing_google_places_id = isset($_GET['google_places_id']) && is_numeric($_GET['google_places_id']) ? (int)$_GET['google_places_id'] : null;
 
 if ($address === '' && $place_id_hint === '') {
   fail("Missing required query param: address or place_id");
@@ -1557,6 +1583,10 @@ if ($address === '' && $place_id_hint === '') {
 
 $region = isset($_GET['region']) ? trim((string)$_GET['region']) : 'us';
 $apartment_listings_id = isset($_GET['apartment_listings_id']) && is_numeric($_GET['apartment_listings_id']) ? (int)$_GET['apartment_listings_id'] : null;
+
+if ($existing_google_places_id) {
+  dbg('INPUT existing_google_places_id='.$existing_google_places_id.' (will link new google_addresses to this)');
+}
 $needleNorm = $address !== '' ? normalize_address_strict($address) : '';
 $near = [];
 $gaNear = [];
@@ -1578,11 +1608,7 @@ dbg('Main DB connected OK');
 // If a place_id is provided, skip address matching and go directly to lookup/refresh
 if ($place_id_hint !== '') {
   // Check if we already have this place_id in google_addresses
-  $stmt = $mysqli->prepare("SELECT id, place_id, json_dump, UNIX_TIMESTAMP(last_updated) as ts FROM google_addresses WHERE place_id = ? ORDER BY last_updated DESC LIMIT 1");
-  if (!$stmt) {
-    // Fallback for schemas without last_updated column
-    $stmt = $mysqli->prepare("SELECT id, place_id, json_dump, NULL as ts FROM google_addresses WHERE place_id = ? ORDER BY id DESC LIMIT 1");
-  }
+  $stmt = $mysqli->prepare("SELECT id, place_id, json_dump, NULL as ts FROM google_addresses WHERE place_id = ? ORDER BY id DESC LIMIT 1");
   $stmt->bind_param("s", $place_id_hint);
   $stmt->execute();
   $res = $stmt->get_result();
@@ -1632,17 +1658,20 @@ if ($place_id_hint !== '') {
     
     // Data exists but is stale, refresh it
     dbg("Found stale place_id data (age={$age_hours}h), refreshing via Place Details API");
-    $details = google_place_details($place_id_hint);
+    $all_fields = 'place_id,name,formatted_address,geometry,rating,user_ratings_total,types,formatted_phone_number,international_phone_number,website,url,opening_hours,photos,reviews,price_level,address_components,business_status,vicinity,utc_offset,adr_address,editorial_summary,current_opening_hours,secondary_opening_hours,plus_code,icon,icon_background_color,icon_mask_base_uri';
+    $url = 'https://maps.googleapis.com/maps/api/place/details/json?place_id='.rawurlencode($place_id_hint)
+         .'&key='.rawurlencode($GOOGLE_API_KEY)
+         .'&language=en'
+         .'&fields='.rawurlencode($all_fields);
+    dbg('Calling Places Details (stale refresh): '.preg_replace('~key=[^&]+~','key=REDACTED',$url));
+    $details = http_get_json($url);
+    dbg('Places Details status='.( $details['status'] ?? 'null'));
     
     if ($details && isset($details['result'])) {
       $result = $details['result'];
       // Update the existing record
       $json_enc = json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-      $update = $mysqli->prepare("UPDATE google_addresses SET json_dump = ?, last_updated = NOW() WHERE id = ?");
-      if (!$update) {
-        // Fallback if last_updated is not present
-        $update = $mysqli->prepare("UPDATE google_addresses SET json_dump = ? WHERE id = ?");
-      }
+      $update = $mysqli->prepare("UPDATE google_addresses SET json_dump = ? WHERE id = ?");
       $update->bind_param("si", $json_enc, $ga_id);
       $update->execute();
       $update->close();
@@ -1670,17 +1699,20 @@ if ($place_id_hint !== '') {
   } else {
     // No existing record, fetch from Place Details and insert
     dbg("No existing record for place_id={$place_id_hint}, fetching from Place Details API");
-    $details = google_place_details($place_id_hint);
+    $all_fields = 'place_id,name,formatted_address,geometry,rating,user_ratings_total,types,formatted_phone_number,international_phone_number,website,url,opening_hours,photos,reviews,price_level,address_components,business_status,vicinity,utc_offset,adr_address,editorial_summary,current_opening_hours,secondary_opening_hours,plus_code,icon,icon_background_color,icon_mask_base_uri';
+    $url = 'https://maps.googleapis.com/maps/api/place/details/json?place_id='.rawurlencode($place_id_hint)
+         .'&key='.rawurlencode($GOOGLE_API_KEY)
+         .'&language=en'
+         .'&fields='.rawurlencode($all_fields);
+    dbg('Calling Places Details (new record): '.preg_replace('~key=[^&]+~','key=REDACTED',$url));
+    $details = http_get_json($url);
+    dbg('Places Details status='.( $details['status'] ?? 'null'));
     
     if ($details && isset($details['result'])) {
       $result = $details['result'];
       $json_enc = json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
       
-      $insert = $mysqli->prepare("INSERT INTO google_addresses (place_id, json_dump, last_updated) VALUES (?, ?, NOW())");
-      if (!$insert) {
-        // Fallback if last_updated is not present
-        $insert = $mysqli->prepare("INSERT INTO google_addresses (place_id, json_dump) VALUES (?, ?)");
-      }
+      $insert = $mysqli->prepare("INSERT INTO google_addresses (place_id, json_dump) VALUES (?, ?)");
       $insert->bind_param("ss", $place_id_hint, $json_enc);
       $insert->execute();
       $new_ga_id = $insert->insert_id;
@@ -2493,10 +2525,23 @@ if ($GOOGLE_API_KEY) {
         }
         $new_ga_id = $ins['id'];
 
+        // If existing_google_places_id was provided, link it to the new google_addresses record
+        if ($existing_google_places_id && $new_ga_id) {
+          dbg('Linking existing google_places.id='.$existing_google_places_id.' to new google_addresses.id='.$new_ga_id);
+          $update = $mysqli->prepare("UPDATE google_places SET google_addresses_id = ? WHERE id = ?");
+          if ($update) {
+            $update->bind_param('ii', $new_ga_id, $existing_google_places_id);
+            $update->execute();
+            $rows_updated = $update->affected_rows;
+            $update->close();
+            dbg('Updated google_places: '.$rows_updated.' rows affected');
+          }
+        }
+
         // Ensure coords exist (already provided above), then build final response
         $final_ids = [
           'google_addresses_id'     => $new_ga_id,
-          'google_places_id'        => null,
+          'google_places_id'        => $existing_google_places_id ?? null,
           'king_county_parcels_id'  => null,
         ];
 
@@ -2557,6 +2602,18 @@ if (!$resultPlaces && $GOOGLE_API_KEY) {
   dbg('Calling Geocode: '.preg_replace('~key=[^&]+~','key=REDACTED',$url_geo));
   $gj = http_get_json($url_geo);
   dbg('Geocode status='.( $gj['status'] ?? 'null').' results='.( is_array($gj['results'] ?? null) ? count($gj['results']) : 0));
+  
+  // Track API usage
+  if ($gj && ($gj['status'] ?? '') === 'OK') {
+    try {
+      log_google_api_call($mysqli, 'geocoding', 1, [
+        'address' => substr($address, 0, 100),
+        'region' => $region
+      ]);
+    } catch (Exception $e) {
+      error_log("[API Track] Failed to log Geocoding call: " . $e->getMessage());
+    }
+  }
 
   if ($gj && ($gj['status'] ?? '') === 'OK' && !empty($gj['results'])) {
     $r = $gj['results'][0];

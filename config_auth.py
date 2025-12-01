@@ -71,9 +71,13 @@ def show_login_dialog(parent_root) -> bool:
             try:
                 if parent_root.state() == 'withdrawn':
                     parent_was_hidden = True
+                    # Set geometry BEFORE showing to position correctly
+                    sw = parent_root.winfo_screenwidth()
+                    x_pos = int(sw * 0.20)  # 20% from left edge
+                    parent_root.geometry(f"360x120+{x_pos}+0")
                     parent_root.deiconify()
                     parent_root.update()
-                    log_to_file("[Auth] Parent was hidden, temporarily showing")
+                    log_to_file("[Auth] Parent was hidden, temporarily showing at correct position")
             except Exception as e:
                 log_to_file(f"[Auth] Error checking parent state: {e}")
         

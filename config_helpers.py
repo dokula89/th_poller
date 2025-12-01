@@ -1091,46 +1091,129 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
             idx = int(values[0])
         except Exception:
             idx = 0
+        
+        log_to_file(f"[Address Match] ===== START run_for_address for row {idx} =====")
+        log_to_file(f"[Address Match] google_address='{google_address}', preloaded_ga_id={preloaded_ga_id}")
+        
+        # Check if row already has GPID - if so, skip API call BUT still update DB if needed
+        skip_api_call = False
+        existing_gpid = None
+        try:
+            gpid_check = tree.set(row_id, "GPID")
+            log_to_file(f"[Address Match] Checking GPID: gpid_check='{gpid_check}'")
+            if gpid_check and gpid_check not in ("", "-"):
+                existing_gpid = gpid_check
+                skip_api_call = True
+                log_to_file(f"[Address Match] ✅ Row {idx} already has GPID={gpid_check}, will skip API call but update DB if needed")
+            else:
+                log_to_file(f"[Address Match] Row {idx} has no GPID (value: '{gpid_check}'), will proceed with API call")
+        except Exception as e:
+            log_to_file(f"[Address Match] ❌ Failed to check GPID for skip: {e}")
             
         # Show loader
         tree.set(row_id, "✓", "⏳")
         try:
-            # If we have a PreLoaded GA ID, try to get its place_id from the database
+            # Check if this row has a Google Places ID (GPID column, index 9)
+            # Only use place_id lookup if it's from google_places, not google_addresses
+            google_places_id = None
+            try:
+                gpid_value = tree.set(row_id, "GPID")
+                if gpid_value and gpid_value not in ("", "-"):
+                    google_places_id = gpid_value
+                    log_to_file(f"[Address Match] Row has Google Places ID: {google_places_id}")
+            except Exception as e:
+                log_to_file(f"[Address Match] Failed to get GPID: {e}")
+            
+            # Only use place_id lookup if we have a google_places_id
             place_id_to_use = None
-            if preloaded_ga_id and preloaded_ga_id != "-":
+            if google_places_id:
+                # This row has a Google Places ID - lookup place_id directly from google_places table
                 try:
                     conn = get_db_connection()
                     if not conn:
                         raise Exception("Failed to get DB connection")
                     cursor = conn.cursor(dictionary=True)
-                    cursor.execute("SELECT place_id FROM google_addresses WHERE id = %s", (int(preloaded_ga_id),))
+                    cursor.execute("SELECT place_id FROM google_places WHERE id = %s", (int(google_places_id),))
                     row = cursor.fetchone()
                     cursor.close()
                     # Don't close shared connection - it's reused
                     if row and row.get('place_id'):
                         place_id_to_use = row['place_id']
-                        log_to_file(f"[Address Match] Found place_id '{place_id_to_use}' for GA ID {preloaded_ga_id}")
+                        log_to_file(f"[Address Match] Using place_id from google_places table (GPID={google_places_id}): '{place_id_to_use}'")
+                    else:
+                        log_to_file(f"[Address Match] No place_id found for GPID={google_places_id}, will use address lookup")
                 except Exception as e:
-                    log_to_file(f"[Address Match] Failed to lookup place_id for GA ID {preloaded_ga_id}: {e}")
-            
-            # Build URL - use place_id if available, otherwise use address
-            if place_id_to_use:
-                encoded_place_id = requests.utils.quote(place_id_to_use)
-                url = php_url(f"step5/find_or_create_place.php?place_id={encoded_place_id}&html=yes&debug=1")
-                log_to_file(f"[Address Match] Using place_id lookup: {place_id_to_use}")
+                    log_to_file(f"[Address Match] Failed to lookup place_id for GPID {google_places_id}: {e}")
             else:
-                encoded_address = requests.utils.quote(google_address)
-                url = php_url(f"step5/find_or_create_place.php?address={encoded_address}&html=yes&debug=1")
+                # No google_places_id - use address lookup
+                log_to_file(f"[Address Match] No Google Places ID - using address lookup")
             
-            # Use separate connect/read timeouts to avoid premature read timeouts on slower API paths
-            # Connect: 8s, Read: 90s
-            response = requests.get(url, timeout=(8, 90))
-            result_text = response.text  # Store full response (error or JSON)
-            results_cache[idx] = result_text
+            # If we should skip API call (already have GPID), create a synthetic response for DB update
+            # Check if we can skip API call (GPID exists AND has google_addresses_id)
+            actually_skip_api = False
+            if skip_api_call and existing_gpid:
+                log_to_file(f"[Address Match] Checking if we can skip API call for existing GPID={existing_gpid}")
+                # Look up google_addresses_id from google_places table using GPID
+                google_addresses_id_for_gpid = None
+                try:
+                    conn = get_db_connection()
+                    if conn:
+                        cursor = conn.cursor(dictionary=True)
+                        cursor.execute("SELECT google_addresses_id FROM google_places WHERE id = %s", (int(existing_gpid) if existing_gpid.isdigit() else existing_gpid,))
+                        row = cursor.fetchone()
+                        cursor.close()
+                        if row and row.get('google_addresses_id'):
+                            google_addresses_id_for_gpid = row['google_addresses_id']
+                            log_to_file(f"[Address Match] ✅ Found google_addresses_id={google_addresses_id_for_gpid} for GPID={existing_gpid} - can skip API call")
+                            actually_skip_api = True
+                        else:
+                            log_to_file(f"[Address Match] ⚠️ GPID={existing_gpid} has NULL google_addresses_id - MUST call API to get/create address")
+                except Exception as e:
+                    log_to_file(f"[Address Match] Failed to lookup google_addresses_id for GPID: {e}")
+                
+                # Only create synthetic response if we can actually skip (both IDs present)
+                if actually_skip_api and google_addresses_id_for_gpid:
+                    result_json = {
+                        "ok": True,
+                        "final_ids": {
+                            "google_addresses_id": google_addresses_id_for_gpid,
+                            "google_places_id": int(existing_gpid) if existing_gpid.isdigit() else existing_gpid,
+                            "king_county_parcels_id": None
+                        },
+                        "result": {},
+                        "similarity_score": 100,
+                        "skipped_api_calls": True,
+                        "api_call_type": "Skipped"
+                    }
+                    result_text = json.dumps(result_json)
+                    results_cache[idx] = result_text
+            
+            if not actually_skip_api:
+                # Build URL - use place_id only if from google_places, otherwise use address
+                if place_id_to_use:
+                    encoded_place_id = requests.utils.quote(place_id_to_use)
+                    url = php_url(f"step5/find_or_create_place.php?place_id={encoded_place_id}&html=yes&debug=1")
+                    log_to_file(f"[Address Match] Using place_id lookup: {place_id_to_use}")
+                    # If we have existing_gpid (forced API call due to missing google_addresses_id),
+                    # pass it to the API so it can link the new google_addresses record
+                    if existing_gpid:
+                        url += f"&google_places_id={existing_gpid}"
+                        log_to_file(f"[Address Match] ⚠️ Passing existing GPID={existing_gpid} to API for linking")
+                else:
+                    # Use address lookup without place_id
+                    encoded_address = requests.utils.quote(google_address)
+                    url = php_url(f"step5/find_or_create_place.php?address={encoded_address}&html=yes&debug=1")
+                
+                # Use separate connect/read timeouts to avoid premature read timeouts on slower API paths
+                # Connect: 8s, Read: 90s
+                response = requests.get(url, timeout=(8, 90))
+                result_text = response.text  # Store full response (error or JSON)
+                results_cache[idx] = result_text
             
             # Try to parse JSON response to get all data
             try:
-                result_json = json.loads(result_text)
+                if not actually_skip_api:
+                    result_json = json.loads(result_text)
                 log_to_file(f"[Address Match] Raw JSON keys for {idx}: {list(result_json.keys())}")
                 # If the API returned an explicit error, mark row red and stop
                 try:
@@ -1302,13 +1385,15 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
                     api_updated = False
 
                 log_to_file(f"[Address Match] Extracted for {idx}: score={similarity_score}, name={name}, rating={rating}, reviews={user_ratings_total}, skipped={skipped_api_calls}, api_updated={api_updated}")
+                log_to_file(f"[Address Match] IDs from API: google_addresses_id={google_addresses_id}, google_places_id={google_places_id}")
                 
-                # Track if database was updated
-                db_updated = api_updated
+                # Track if database was updated (independent of API response)
+                db_updated = False
                 
 
-                # Always update apartment_listings.google_addresses_id and google_places_id if google_addresses_id is present
-                if google_addresses_id:
+                # Always update apartment_listings.google_addresses_id and google_places_id if either ID is present
+                if google_addresses_id or google_places_id:
+                    log_to_file(f"[Address Match] ✅ At least one ID present, will attempt DB update (GAID={google_addresses_id}, GPID={google_places_id})")
                     try:
                         conn = get_db_connection()
                         if not conn:
@@ -1346,23 +1431,49 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
                         google_address_for_lookup = None
                         if not apartment_listing_id:
                             try:
+                                import re
                                 listing = listings[idx-1]
                                 listing_website = listing.get("listing_website") or listing.get("url") or listing.get("link")
                                 full_address = listing.get("full_address") or listing.get("address")
-                                google_address_for_lookup = listing.get("google_address")
+                                raw_google_address = listing.get("google_address")
+                                
+                                # Strip unit numbers from google_address before lookup
+                                if raw_google_address:
+                                    patterns = [
+                                        r'\s+\d{1,4}(?:A|B|C|D)?,\s+',  # " 334, " or " 101, " before city
+                                        r'\s+-\s*\d+[A-Za-z]?,\s+',  # " - 00A, " before city
+                                        r'\s*#\d+.*$',  # #34 at end
+                                        r'\s*Unit\s+[A-Za-z0-9]+.*$',  # Unit 123
+                                        r'\s*Apt\.?\s+[A-Za-z0-9]+.*$',  # Apt A or Apt. A
+                                        r'\s*Suite\s+[A-Za-z0-9]+.*$',  # Suite X
+                                        r'\s*Ste\.?\s+[A-Za-z0-9]+.*$',  # Ste X
+                                        r',\s*Apt\.?\s+[A-Za-z0-9]+',  # , Apt 302
+                                        r'\s+[A-Za-z]?\d{2,4}[A-Za-z]?$',  # Space followed by 2-4 digits at very end
+                                    ]
+                                    google_address_for_lookup = raw_google_address
+                                    for pattern in patterns:
+                                        google_address_for_lookup = re.sub(pattern, ', ' if ', ' in pattern else '', google_address_for_lookup, flags=re.IGNORECASE)
+                                    google_address_for_lookup = google_address_for_lookup.strip()
+                                    log_to_file(f"[Address Match] Stripped units: '{raw_google_address}' → '{google_address_for_lookup}'")
+                                
                                 log_to_file(f"[Address Match] Will try lookup by: listing_website={listing_website}, full_address={full_address}, google_address={google_address_for_lookup}")
                             except Exception as e:
                                 log_to_file(f"[Address Match] Failed to get lookup fields from JSON: {e}")
                         
                         rows_affected = 0
                         if apartment_listing_id:
+                            log_to_file(f"[Address Match] Attempting UPDATE by id={apartment_listing_id} (GAID={google_addresses_id}, GPID={google_places_id})")
                             cursor.execute("""
                                 UPDATE apartment_listings 
                                 SET google_addresses_id = %s, google_places_id = %s
                                 WHERE id = %s
                             """, (google_addresses_id, google_places_id, apartment_listing_id))
                             rows_affected = cursor.rowcount
-                            log_to_file(f"[Address Match] UPDATE by id={apartment_listing_id}: {rows_affected} rows affected")
+                            if rows_affected > 0:
+                                db_updated = True
+                                log_to_file(f"[Address Match] ✅ UPDATE by id={apartment_listing_id}: {rows_affected} rows affected → db_updated=True")
+                            else:
+                                log_to_file(f"[Address Match] ⚠️ UPDATE by id={apartment_listing_id}: 0 rows affected")
                         elif listing_website:
                             cursor.execute("""
                                 UPDATE apartment_listings 
@@ -1370,6 +1481,8 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
                                 WHERE listing_website = %s
                             """, (google_addresses_id, google_places_id, listing_website))
                             rows_affected = cursor.rowcount
+                            if rows_affected > 0:
+                                db_updated = True
                             log_to_file(f"[Address Match] UPDATE by listing_website: {rows_affected} rows affected")
                         elif full_address:
                             cursor.execute("""
@@ -1378,6 +1491,8 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
                                 WHERE full_address = %s
                             """, (google_addresses_id, google_places_id, full_address))
                             rows_affected = cursor.rowcount
+                            if rows_affected > 0:
+                                db_updated = True
                             log_to_file(f"[Address Match] UPDATE by full_address='{full_address}': {rows_affected} rows affected")
                         elif google_address_for_lookup:
                             cursor.execute("""
@@ -1386,6 +1501,8 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
                                 WHERE google_address = %s
                             """, (google_addresses_id, google_places_id, google_address_for_lookup))
                             rows_affected = cursor.rowcount
+                            if rows_affected > 0:
+                                db_updated = True
                             log_to_file(f"[Address Match] UPDATE by google_address='{google_address_for_lookup}': {rows_affected} rows affected")
                         else:
                             # No identifying fields available for UPDATE, will try INSERT
@@ -1410,6 +1527,7 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
                                     """, (google_address_for_lookup, google_addresses_id, google_places_id))
                                     apartment_listing_id = cursor.lastrowid
                                     rows_affected = 1
+                                    db_updated = True
                                     log_to_file(f"[Address Match] ✅ Inserted new apartment_listings row with id={apartment_listing_id}")
                                     # Update the UI with the new Apt ID
                                     tree.set(row_id, "Apt ID", str(apartment_listing_id))
@@ -1461,7 +1579,19 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
                         except Exception as e:
                             log_to_file(f"[Address Match] Failed to refresh PreGAID from DB: {e}")
                     except Exception as db_err:
-                        log_to_file(f"[Address Match] Failed to update DB for address {idx}: {db_err}")
+                        log_to_file(f"[Address Match] ❌❌❌ CRITICAL EXCEPTION in DB update block for address {idx}: {db_err}")
+                        import traceback
+                        traceback_str = traceback.format_exc()
+                        log_to_file(f"[Address Match] ❌❌❌ Full Traceback:\n{traceback_str}")
+                        # Show error in UI
+                        tree.set(row_id, "✓", "❌")
+                        tree.item(row_id, tags=("error",))
+                        # Cache error message for viewing
+                        if idx in results_cache:
+                            results_cache[idx] = f"DATABASE UPDATE ERROR:\n{db_err}\n\n{traceback_str}\n\n=== Original Response ===\n{results_cache[idx]}"
+                        else:
+                            results_cache[idx] = f"DATABASE UPDATE ERROR:\n{db_err}\n\n{traceback_str}"
+                        return  # Exit early on error
 
                 # NOTE: Name, Rating, Reviews are already set from API response above (lines 6664-6667)
                 # We do NOT fetch from google_addresses table here because Play button should use fresh API data
@@ -1501,7 +1631,9 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
                     log_to_file(f"[Address Match] Failed to refresh GAID from DB: {e}")
 
                 # Show explicit result: ✓ if updated, X if not
-                tree.set(row_id, "✓", "✓" if db_updated else "X")
+                status_icon = "✓" if db_updated else "X"
+                log_to_file(f"[Address Match] Setting status for row {idx}: db_updated={db_updated} → icon='{status_icon}'")
+                tree.set(row_id, "✓", status_icon)
 
                 # Color the row based on outcome
                 try:
@@ -1715,6 +1847,8 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
         preloaded_display = f"{preloaded_ga_id} 🗑" if preloaded_ga_id else "-"
         # Combine match_score into Score column (show both if match exists)
         score_display = match_score if match_score != "-" else "-"
+        # Use database GPID if available, otherwise use JSON value
+        gpid_display = str(preloaded_gp_id) if preloaded_gp_id else (json_google_places_id if json_google_places_id else "-")
         rid = tree.insert("", "end", values=(
             i,
             apartment_listing_id if apartment_listing_id else "-",  # Apt ID
@@ -1725,7 +1859,7 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
             rating,
             reviews,
             str(preloaded_ga_id) if preloaded_ga_id else "-",  # GAID
-            json_google_places_id if json_google_places_id else "-",  # GPID
+            gpid_display,  # GPID - use DB value first, then JSON
             king_county_id if king_county_id else "-",
             score_display,  # Score (includes match percentage)
             place_type,  # Type (from json_dump types field)
@@ -1932,6 +2066,9 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
             if not values:
                 return
             
+            # Column mapping: #1=Idx, #2=Apt ID, #3=PreGAID, #4=Google, #5=Formatted, #6=Name, 
+            # #7=Rating, #8=Reviews, #9=GAID, #10=GPID, #11=KC_ID, #12=Score, #13=Type, #14=GAPI, #15=✓
+            
             # If right-clicked on Apt ID column (#2), show apartment_listings details
             if col == "#2":
                 apt_id = values[1]  # Apt ID is second column (index 1)
@@ -1939,12 +2076,248 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
                     show_apartment_listing_details(apt_id)
                 else:
                     messagebox.showinfo("No Apt ID", "This row has no Apartment Listing ID.", parent=window)
+            # If right-clicked on GAID column (#9), show google_addresses details
+            elif col == "#9":
+                gaid = values[8]  # GAID is 9th column (index 8)
+                if gaid and gaid not in ("-", ""):
+                    show_google_addresses_details(gaid)
+                else:
+                    messagebox.showinfo("No GAID", "This row has no Google Addresses ID.", parent=window)
+            # If right-clicked on GPID column (#10), show google_places details
+            elif col == "#10":
+                gpid = values[9]  # GPID is 10th column (index 9)
+                if gpid and gpid not in ("-", ""):
+                    show_google_places_details(gpid)
+                else:
+                    messagebox.showinfo("No GPID", "This row has no Google Places ID.", parent=window)
             else:
                 # Otherwise show API response
                 open_full_response_for_row(values)
         except Exception as e:
             log_to_file(f"[Address Match] on_row_right_click error: {e}")
     
+    def show_google_addresses_details(gaid):
+        """Show all google_addresses data for the given ID in a formatted window."""
+        try:
+            conn = get_db_connection()
+            if not conn:
+                messagebox.showerror("Database Error", "Failed to connect to database", parent=window)
+                return
+            
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM google_addresses WHERE id = %s", (gaid,))
+            row = cursor.fetchone()
+            cursor.close()
+            
+            if not row:
+                messagebox.showinfo("Not Found", f"No google_addresses record found for ID {gaid}", parent=window)
+                return
+            
+            # Create viewer window
+            viewer = tk.Toplevel(window)
+            viewer.title(f"Google Addresses Details - ID {gaid}")
+            viewer.geometry("1000x700")
+            viewer.configure(bg="#1E1E1E")
+            
+            # Header
+            header = tk.Label(viewer, text=f"Google Addresses ID: {gaid}", 
+                            bg="#8E44AD", fg="#ECF0F1", font=("Segoe UI", 14, "bold"), pady=10)
+            header.pack(fill="x")
+            
+            # Scrollable frame for data
+            canvas = tk.Canvas(viewer, bg="#1E1E1E", highlightthickness=0)
+            scrollbar = tk.Scrollbar(viewer, orient="vertical", command=canvas.yview)
+            scrollable_frame = tk.Frame(canvas, bg="#1E1E1E")
+            
+            scrollable_frame.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+            
+            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            
+            # Display ALL fields from database
+            for field_name, field_value in row.items():
+                if field_value is None:
+                    field_value = "-"
+                
+                # Create frame for each field
+                field_frame = tk.Frame(scrollable_frame, bg="#2C3E50", padx=10, pady=5)
+                field_frame.pack(fill="x", padx=10, pady=2)
+                
+                # Label (field name)
+                lbl = tk.Label(field_frame, text=f"{field_name}:", 
+                             bg="#2C3E50", fg="#9B59B6", font=("Segoe UI", 10, "bold"), anchor="nw", width=28)
+                lbl.pack(side="left", padx=(0, 10), anchor="n")
+                
+                # Value
+                val_text = str(field_value)
+                if len(val_text) > 300:
+                    # Use Text widget for long values (like JSON)
+                    val_frame = tk.Frame(field_frame, bg="#34495E")
+                    val_frame.pack(side="left", fill="both", expand=True)
+                    
+                    # Calculate height based on content length
+                    text_height = min(15, max(5, len(val_text) // 120))
+                    
+                    val_widget = tk.Text(val_frame, bg="#34495E", fg="#ECF0F1", 
+                                       font=("Consolas", 9), wrap="word", height=text_height, relief="flat")
+                    val_widget.insert("1.0", val_text)
+                    val_widget.config(state="disabled")
+                    
+                    # Add scrollbar for text widget
+                    text_scroll = tk.Scrollbar(val_frame, command=val_widget.yview)
+                    val_widget.configure(yscrollcommand=text_scroll.set)
+                    
+                    val_widget.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+                    text_scroll.pack(side="right", fill="y")
+                else:
+                    # Use Label for short values
+                    val = tk.Label(field_frame, text=val_text, 
+                                 bg="#34495E", fg="#ECF0F1", font=("Consolas", 9), 
+                                 anchor="nw", wraplength=650, justify="left", padx=5, pady=3)
+                    val.pack(side="left", fill="both", expand=True)
+            
+            canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+            scrollbar.pack(side="right", fill="y")
+            
+            # Buttons
+            btn_frame = tk.Frame(viewer, bg="#1E1E1E")
+            btn_frame.pack(fill="x", padx=10, pady=10)
+            
+            def copy_all():
+                try:
+                    text = f"Google Addresses ID: {gaid}\n" + "="*50 + "\n\n"
+                    for field_name, field_value in row.items():
+                        value = field_value if field_value is not None else "-"
+                        text += f"{field_name}: {value}\n"
+                    viewer.clipboard_clear()
+                    viewer.clipboard_append(text)
+                    messagebox.showinfo("Copied", "All data copied to clipboard", parent=viewer)
+                except Exception as e:
+                    log_to_file(f"[Address Match] Copy error: {e}")
+            
+            tk.Button(btn_frame, text="Copy All", command=copy_all,
+                     bg="#34495E", fg="#ECF0F1", relief="flat", padx=12, pady=5).pack(side="left")
+            tk.Button(btn_frame, text="Close", command=viewer.destroy,
+                     bg="#95A5A6", fg="#fff", relief="flat", padx=12, pady=5).pack(side="right")
+            
+        except Exception as e:
+            log_to_file(f"[Address Match] show_google_addresses_details error: {e}")
+            messagebox.showerror("Error", f"Failed to load google_addresses details: {e}", parent=window)
+
+    def show_google_places_details(gpid):
+        """Show all google_places data for the given ID in a formatted window."""
+        try:
+            conn = get_db_connection()
+            if not conn:
+                messagebox.showerror("Database Error", "Failed to connect to database", parent=window)
+                return
+            
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM google_places WHERE id = %s", (gpid,))
+            row = cursor.fetchone()
+            cursor.close()
+            
+            if not row:
+                messagebox.showinfo("Not Found", f"No google_places record found for ID {gpid}", parent=window)
+                return
+            
+            # Create viewer window
+            viewer = tk.Toplevel(window)
+            viewer.title(f"Google Places Details - ID {gpid}")
+            viewer.geometry("1000x700")
+            viewer.configure(bg="#1E1E1E")
+            
+            # Header
+            header = tk.Label(viewer, text=f"Google Places ID: {gpid}", 
+                            bg="#16A085", fg="#ECF0F1", font=("Segoe UI", 14, "bold"), pady=10)
+            header.pack(fill="x")
+            
+            # Scrollable frame for data
+            canvas = tk.Canvas(viewer, bg="#1E1E1E", highlightthickness=0)
+            scrollbar = tk.Scrollbar(viewer, orient="vertical", command=canvas.yview)
+            scrollable_frame = tk.Frame(canvas, bg="#1E1E1E")
+            
+            scrollable_frame.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+            
+            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            
+            # Display ALL fields from database
+            for field_name, field_value in row.items():
+                if field_value is None:
+                    field_value = "-"
+                
+                # Create frame for each field
+                field_frame = tk.Frame(scrollable_frame, bg="#2C3E50", padx=10, pady=5)
+                field_frame.pack(fill="x", padx=10, pady=2)
+                
+                # Label (field name)
+                lbl = tk.Label(field_frame, text=f"{field_name}:", 
+                             bg="#2C3E50", fg="#1ABC9C", font=("Segoe UI", 10, "bold"), anchor="nw", width=28)
+                lbl.pack(side="left", padx=(0, 10), anchor="n")
+                
+                # Value
+                val_text = str(field_value)
+                if len(val_text) > 300:
+                    # Use Text widget for long values
+                    val_frame = tk.Frame(field_frame, bg="#34495E")
+                    val_frame.pack(side="left", fill="both", expand=True)
+                    
+                    # Calculate height based on content length
+                    text_height = min(15, max(5, len(val_text) // 120))
+                    
+                    val_widget = tk.Text(val_frame, bg="#34495E", fg="#ECF0F1", 
+                                       font=("Consolas", 9), wrap="word", height=text_height, relief="flat")
+                    val_widget.insert("1.0", val_text)
+                    val_widget.config(state="disabled")
+                    
+                    # Add scrollbar for text widget
+                    text_scroll = tk.Scrollbar(val_frame, command=val_widget.yview)
+                    val_widget.configure(yscrollcommand=text_scroll.set)
+                    
+                    val_widget.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+                    text_scroll.pack(side="right", fill="y")
+                else:
+                    # Use Label for short values
+                    val = tk.Label(field_frame, text=val_text, 
+                                 bg="#34495E", fg="#ECF0F1", font=("Consolas", 9), 
+                                 anchor="nw", wraplength=650, justify="left", padx=5, pady=3)
+                    val.pack(side="left", fill="both", expand=True)
+            
+            canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+            scrollbar.pack(side="right", fill="y")
+            
+            # Buttons
+            btn_frame = tk.Frame(viewer, bg="#1E1E1E")
+            btn_frame.pack(fill="x", padx=10, pady=10)
+            
+            def copy_all():
+                try:
+                    text = f"Google Places ID: {gpid}\n" + "="*50 + "\n\n"
+                    for field_name, field_value in row.items():
+                        value = field_value if field_value is not None else "-"
+                        text += f"{field_name}: {value}\n"
+                    viewer.clipboard_clear()
+                    viewer.clipboard_append(text)
+                    messagebox.showinfo("Copied", "All data copied to clipboard", parent=viewer)
+                except Exception as e:
+                    log_to_file(f"[Address Match] Copy error: {e}")
+            
+            tk.Button(btn_frame, text="Copy All", command=copy_all,
+                     bg="#34495E", fg="#ECF0F1", relief="flat", padx=12, pady=5).pack(side="left")
+            tk.Button(btn_frame, text="Close", command=viewer.destroy,
+                     bg="#95A5A6", fg="#fff", relief="flat", padx=12, pady=5).pack(side="right")
+            
+        except Exception as e:
+            log_to_file(f"[Address Match] show_google_places_details error: {e}")
+            messagebox.showerror("Error", f"Failed to load google_places details: {e}", parent=window)
+
     def show_apartment_listing_details(apt_id):
         """Show all apartment_listings data for the given ID in a formatted window."""
         try:
@@ -1965,7 +2338,7 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
             # Create viewer window
             viewer = tk.Toplevel(window)
             viewer.title(f"Apartment Listing Details - ID {apt_id}")
-            viewer.geometry("800x600")
+            viewer.geometry("1000x700")
             viewer.configure(bg="#1E1E1E")
             
             # Header
@@ -1986,72 +2359,47 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
             canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
             canvas.configure(yscrollcommand=scrollbar.set)
             
-            # Display each field
-            fields_to_display = [
-                ("ID", "id"),
-                ("Google Address", "google_address"),
-                ("Google Addresses ID", "google_addresses_id"),
-                ("Google Places ID", "google_places_id"),
-                ("Listing Website", "listing_website"),
-                ("Full Address", "full_address"),
-                ("Apartment Name", "apartment_name"),
-                ("City", "city"),
-                ("State", "state"),
-                ("Zip Code", "zip_code"),
-                ("Bedrooms", "bedrooms"),
-                ("Bathrooms", "bathrooms"),
-                ("Rent", "rent"),
-                ("Deposit", "deposit"),
-                ("Square Feet", "square_feet"),
-                ("Available Date", "available_date"),
-                ("Pet Policy", "pet_policy"),
-                ("Parking", "parking"),
-                ("Utilities Included", "utilities_included"),
-                ("Amenities", "amenities"),
-                ("Description", "description"),
-                ("Contact Name", "contact_name"),
-                ("Contact Phone", "contact_phone"),
-                ("Contact Email", "contact_email"),
-                ("Image URLs", "image_urls"),
-                ("Date Added", "date_added"),
-                ("Last Updated", "last_updated"),
-                ("Status", "status"),
-                ("Source", "source"),
-                ("External ID", "external_id"),
-            ]
-            
-            for label, field in fields_to_display:
-                if field in row:
-                    value = row[field]
-                    if value is None:
-                        value = "-"
+            # Display ALL fields from database
+            for field_name, field_value in row.items():
+                if field_value is None:
+                    field_value = "-"
+                
+                # Create frame for each field
+                field_frame = tk.Frame(scrollable_frame, bg="#2C3E50", padx=10, pady=5)
+                field_frame.pack(fill="x", padx=10, pady=2)
+                
+                # Label (field name)
+                lbl = tk.Label(field_frame, text=f"{field_name}:", 
+                             bg="#2C3E50", fg="#3498DB", font=("Segoe UI", 10, "bold"), anchor="nw", width=28)
+                lbl.pack(side="left", padx=(0, 10), anchor="n")
+                
+                # Value
+                val_text = str(field_value)
+                if len(val_text) > 300:
+                    # Use Text widget for long values
+                    val_frame = tk.Frame(field_frame, bg="#34495E")
+                    val_frame.pack(side="left", fill="both", expand=True)
                     
-                    # Create frame for each field
-                    field_frame = tk.Frame(scrollable_frame, bg="#2C3E50", padx=10, pady=5)
-                    field_frame.pack(fill="x", padx=10, pady=2)
+                    # Calculate height based on content length
+                    text_height = min(15, max(5, len(val_text) // 120))
                     
-                    # Label
-                    lbl = tk.Label(field_frame, text=f"{label}:", 
-                                 bg="#2C3E50", fg="#3498DB", font=("Segoe UI", 10, "bold"), anchor="w", width=20)
-                    lbl.pack(side="left", padx=(0, 10))
+                    val_widget = tk.Text(val_frame, bg="#34495E", fg="#ECF0F1", 
+                                       font=("Consolas", 9), wrap="word", height=text_height, relief="flat")
+                    val_widget.insert("1.0", val_text)
+                    val_widget.config(state="disabled")
                     
-                    # Value (with word wrap for long text)
-                    val_text = str(value)
-                    if len(val_text) > 100:
-                        # Use Text widget for long values
-                        val_frame = tk.Frame(field_frame, bg="#34495E")
-                        val_frame.pack(side="left", fill="both", expand=True)
-                        val_widget = tk.Text(val_frame, bg="#34495E", fg="#ECF0F1", 
-                                           font=("Consolas", 9), wrap="word", height=3, relief="flat")
-                        val_widget.insert("1.0", val_text)
-                        val_widget.config(state="disabled")
-                        val_widget.pack(fill="both", expand=True, padx=2, pady=2)
-                    else:
-                        # Use Label for short values
-                        val = tk.Label(field_frame, text=val_text, 
-                                     bg="#34495E", fg="#ECF0F1", font=("Consolas", 9), 
-                                     anchor="w", wraplength=500, justify="left", padx=5, pady=3)
-                        val.pack(side="left", fill="x", expand=True)
+                    # Add scrollbar for text widget
+                    text_scroll = tk.Scrollbar(val_frame, command=val_widget.yview)
+                    val_widget.configure(yscrollcommand=text_scroll.set)
+                    
+                    val_widget.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+                    text_scroll.pack(side="right", fill="y")
+                else:
+                    # Use Label for short values
+                    val = tk.Label(field_frame, text=val_text, 
+                                 bg="#34495E", fg="#ECF0F1", font=("Consolas", 9), 
+                                 anchor="nw", wraplength=650, justify="left", padx=5, pady=3)
+                    val.pack(side="left", fill="both", expand=True)
             
             canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
             scrollbar.pack(side="right", fill="y")
@@ -2172,6 +2520,9 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
             if preloaded_ga_val not in ("", "-"):
                 current_idx += 1
                 continue
+            
+            # NOTE: Do NOT skip rows with GPID - they need to be processed to update apartment_listings.google_addresses_id
+            # The run_for_address function will handle skipping the API call while still updating the database
 
             # Found an eligible row to process
             break
@@ -2540,6 +2891,132 @@ def show_address_match_window(job_id, parent=None, manual_open=False):
         cursor="hand2"
     )
     show_no_apt_id_check.pack(side="left", padx=10)
+    
+    def rerun_non_establishments():
+        """Filter rows where place type is 'premise' (not 'establishment') and auto-run API calls for them."""
+        try:
+            log_to_file("[Address Match] Rerun Non-Establishments button clicked")
+            
+            # Get DB connection to check place types from google_addresses
+            conn = get_db_connection()
+            if not conn:
+                messagebox.showerror("Database Error", "Failed to connect to database", parent=window)
+                return
+            
+            # Collect all rows that are premises (not establishments)
+            premise_rows = []
+            total_checked = 0
+            
+            for row_id in tree.get_children():
+                total_checked += 1
+                try:
+                    # Get GAID to look up place type
+                    gaid = tree.set(row_id, "GAID")
+                    if not gaid or gaid == "-":
+                        continue
+                    
+                    # Query google_addresses for json_dump
+                    cursor = conn.cursor(dictionary=True)
+                    cursor.execute("SELECT json_dump FROM google_addresses WHERE id = %s", (gaid,))
+                    row = cursor.fetchone()
+                    cursor.close()
+                    
+                    if not row or not row.get('json_dump'):
+                        continue
+                    
+                    # Parse json_dump to get types
+                    try:
+                        dump_data = json.loads(row['json_dump'])
+                        result = dump_data.get("result", {})
+                        types = result.get("types", [])
+                        
+                        # Check if this is a premise but not an establishment
+                        is_premise = "premise" in types
+                        is_establishment = "establishment" in types
+                        
+                        if is_premise and not is_establishment:
+                            # This is a non-establishment premise - add to list
+                            google_address = tree.set(row_id, "Google")
+                            preloaded_ga_id = tree.set(row_id, "PreGAID")
+                            if preloaded_ga_id and "🗑" in preloaded_ga_id:
+                                preloaded_ga_id = preloaded_ga_id.replace(" 🗑", "").strip()
+                            premise_rows.append((row_id, google_address, preloaded_ga_id))
+                            log_to_file(f"[Address Match] Found non-establishment premise: {google_address}")
+                    except json.JSONDecodeError as je:
+                        log_to_file(f"[Address Match] Failed to parse json_dump for GAID {gaid}: {je}")
+                        continue
+                        
+                except Exception as e:
+                    log_to_file(f"[Address Match] Error checking row {row_id}: {e}")
+                    continue
+            
+            log_to_file(f"[Address Match] Found {len(premise_rows)} non-establishment premises out of {total_checked} rows")
+            
+            if not premise_rows:
+                messagebox.showinfo("No Premises Found", 
+                                  f"No non-establishment premises found.\nChecked {total_checked} rows.",
+                                  parent=window)
+                return
+            
+            # Confirm with user
+            result = messagebox.askyesno("Rerun Non-Establishments",
+                                        f"Found {len(premise_rows)} non-establishment premises.\n\n"
+                                        f"This will trigger Google Places API calls for each address.\n\n"
+                                        f"Continue?",
+                                        parent=window)
+            
+            if not result:
+                log_to_file("[Address Match] User cancelled rerun operation")
+                return
+            
+            # Process each premise row
+            log_to_file(f"[Address Match] Starting rerun for {len(premise_rows)} premises...")
+            processed_count = 0
+            
+            for row_id, google_address, preloaded_ga_id in premise_rows:
+                try:
+                    log_to_file(f"[Address Match] Rerunning for: {google_address}")
+                    
+                    # Run in background thread
+                    threading.Thread(
+                        target=run_for_address, 
+                        args=(row_id, google_address, preloaded_ga_id), 
+                        daemon=True
+                    ).start()
+                    
+                    processed_count += 1
+                    
+                    # Small delay between API calls to avoid rate limiting
+                    time.sleep(0.5)
+                    
+                except Exception as e:
+                    log_to_file(f"[Address Match] Error processing row {row_id}: {e}")
+                    continue
+            
+            messagebox.showinfo("Rerun Started", 
+                              f"Started reprocessing {processed_count} non-establishment premises.\n\n"
+                              f"Results will appear in the table as they complete.",
+                              parent=window)
+            
+        except Exception as e:
+            log_to_file(f"[Address Match] rerun_non_establishments error: {e}")
+            import traceback
+            log_to_file(f"[Address Match] Traceback: {traceback.format_exc()}")
+            messagebox.showerror("Error", f"Failed to rerun non-establishments: {e}", parent=window)
+    
+    # Rerun Non-Establishments button
+    tk.Button(
+        btn_frame,
+        text="🔄 Rerun Non-Establishments",
+        command=rerun_non_establishments,
+        bg="#E67E22",
+        fg="#fff",
+        font=("Segoe UI", 10, "bold"),
+        relief="flat",
+        padx=14,
+        pady=5,
+        cursor="hand2"
+    ).pack(side="left", padx=10)
     
     def on_window_close():
         """Clean up resources before closing window."""

@@ -791,10 +791,31 @@ from config_core import *
                         google_address_for_lookup = None
                         if not apartment_listing_id:
                             try:
+                                import re
                                 listing = listings[idx-1]
                                 listing_website = listing.get("listing_website") or listing.get("url") or listing.get("link")
                                 full_address = listing.get("full_address") or listing.get("address")
-                                google_address_for_lookup = listing.get("google_address")
+                                raw_google_address = listing.get("google_address")
+                                
+                                # Strip unit numbers from google_address before lookup
+                                if raw_google_address:
+                                    patterns = [
+                                        r'\s+\d{1,4}(?:A|B|C|D)?,\s+',  # " 334, " or " 101, " before city
+                                        r'\s+-\s*\d+[A-Za-z]?,\s+',  # " - 00A, " before city
+                                        r'\s*#\d+.*$',  # #34 at end
+                                        r'\s*Unit\s+[A-Za-z0-9]+.*$',  # Unit 123
+                                        r'\s*Apt\.?\s+[A-Za-z0-9]+.*$',  # Apt A or Apt. A
+                                        r'\s*Suite\s+[A-Za-z0-9]+.*$',  # Suite X
+                                        r'\s*Ste\.?\s+[A-Za-z0-9]+.*$',  # Ste X
+                                        r',\s*Apt\.?\s+[A-Za-z0-9]+',  # , Apt 302
+                                        r'\s+[A-Za-z]?\d{2,4}[A-Za-z]?$',  # Space followed by 2-4 digits at very end
+                                    ]
+                                    google_address_for_lookup = raw_google_address
+                                    for pattern in patterns:
+                                        google_address_for_lookup = re.sub(pattern, ', ' if ', ' in pattern else '', google_address_for_lookup, flags=re.IGNORECASE)
+                                    google_address_for_lookup = google_address_for_lookup.strip()
+                                    log_to_file(f"[Address Match] Stripped units: '{raw_google_address}' → '{google_address_for_lookup}'")
+                                
                                 log_to_file(f"[Address Match] Will try lookup by: listing_website={listing_website}, full_address={full_address}, google_address={google_address_for_lookup}")
                             except Exception as e:
                                 log_to_file(f"[Address Match] Failed to get lookup fields from JSON: {e}")

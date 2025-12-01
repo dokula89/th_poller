@@ -73,3 +73,10 @@ htdocs/xampp/
 # Temporary files
 *.tmp
 *.bak
+
+# Git update checker
+.last_git_check
+
+# Machine-specific session data
+.session_*
+session_*.json

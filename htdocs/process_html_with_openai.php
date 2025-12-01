@@ -1423,19 +1423,41 @@ function parseListingsLocally(string $htmlFile): array {
       // Extract unit (e.g., '#02', 'Apt 5', 'Unit 3B', ' - 28') and remove from address for google_address
       $unit = null;
       $googleAddr = $fullAddr;
-      // Try patterns: - 28, #02, Apt 5, Unit 3B, Ste 4, Suite 7, etc.
-      // Match " - \d+" pattern (e.g., " - 28", " - 206") - must come before comma or end of string
-      if (preg_match('/\s*-\s*(\d+)(?=\s*,|$)/i', $fullAddr, $m)) {
-        $unit = $m[1];  // Just the number
-        $googleAddr = preg_replace('/\s*-\s*\d+(?=\s*,|$)/i', '', $fullAddr);
+      
+      // Comprehensive unit extraction patterns
+      // Pattern 1: " - \d+" or " - \d+[A-Z]?" (e.g., " - 28", " - 00A") before comma or end
+      if (preg_match('/\s*-\s*(\d+[A-Za-z]?)(?=\s*,|$)/i', $fullAddr, $m)) {
+        $unit = $m[1];
+        $googleAddr = preg_replace('/\s*-\s*\d+[A-Za-z]?(?=\s*,|$)/i', '', $fullAddr);
       }
-      // Then try other patterns: #02, Apt 5, Unit 3B, etc.
-      elseif (preg_match('/,?\s*(#\w+|Apt\.?\s*\w+|Unit\s*\w+|Ste\.?\s*\w+|Suite\s*\w+)/i', $fullAddr, $m)) {
-        $unit = trim($m[1]);
-        $googleAddr = trim(str_replace($m[0], '', $fullAddr), ', ');
+      // Pattern 2: #208 or #206 at end
+      elseif (preg_match('/(#\d+[A-Za-z]?)(?=\s*,|$)/i', $fullAddr, $m)) {
+        $unit = $m[1];
+        $googleAddr = preg_replace('/\s*#\d+[A-Za-z]?(?=\s*,|$)/i', '', $fullAddr);
       }
+      // Pattern 3: ", Apt 302" or ", Unit 101" (with comma)
+      elseif (preg_match('/,\s*(Apt\.?|Unit|Suite|Ste\.?)\s+([A-Za-z0-9]+)/i', $fullAddr, $m)) {
+        $unit = trim($m[1] . ' ' . $m[2]);
+        $googleAddr = preg_replace('/,\s*(?:Apt\.?|Unit|Suite|Ste\.?)\s+[A-Za-z0-9]+/i', '', $fullAddr);
+      }
+      // Pattern 4: " Apt 302" or " Unit 101" (without comma, mid-address)
+      elseif (preg_match('/\s+(Apt\.?|Unit|Suite|Ste\.?)\s+([A-Za-z0-9]+)/i', $fullAddr, $m)) {
+        $unit = trim($m[1] . ' ' . $m[2]);
+        $googleAddr = preg_replace('/\s+(?:Apt\.?|Unit|Suite|Ste\.?)\s+[A-Za-z0-9]+/i', '', $fullAddr);
+      }
+      // Pattern 5: Trailing numbers like " 334" or " 101" before comma (e.g., "4555 15th Ave. NE 334, Seattle")
+      elseif (preg_match('/\s+([A-Za-z]?\d{2,4}[A-Za-z]?)(?=\s*,)/', $fullAddr, $m)) {
+        $unit = $m[1];
+        $googleAddr = preg_replace('/\s+[A-Za-z]?\d{2,4}[A-Za-z]?(?=\s*,)/', '', $fullAddr);
+      }
+      
+      // Clean up extra spaces and commas after removal
+      $googleAddr = preg_replace('/\s+/', ' ', $googleAddr);
+      $googleAddr = preg_replace('/,\s*,/', ',', $googleAddr);
+      $googleAddr = trim($googleAddr);
+      
       $listing['unit'] = $unit;
-      $listing['google_address'] = trim($googleAddr);
+      $listing['google_address'] = $googleAddr;
       // Parse address components (from google_address)
       if (preg_match('/^(.+?),\s*([^,]+),\s*([A-Z]{2})\s+(\d{5})$/i', $googleAddr, $match)) {
         $listing['street'] = $match[1];
