@@ -18,6 +18,7 @@ Lines 6351-6427: Utility methods and mainloop
 from config_core import *
 from config_hud_db import update_db_status
 from config_helpers import launch_manual_browser, launch_manual_browser_docked_right, launch_manual_browser_docked_left
+from config_profiles import get_profile_manager, log_profile_info
 import threading
 import re
 import webbrowser
@@ -1118,6 +1119,54 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         # Store versions for later reference
         self._local_version = local_ver
         self._remote_version = remote_ver
+        
+        # Profile selector row (below version)
+        profile_row = tk.Frame(body, bg=bg)
+        profile_row.pack(fill="x", pady=(0, 4))
+        
+        profile_mgr = get_profile_manager()
+        log_profile_info()
+        
+        self._selected_profile = tk.StringVar(value=profile_mgr.active_profile)
+        
+        profile_container = tk.Frame(profile_row, bg=bg)
+        profile_container.pack(side="right")
+        
+        profile_lbl = tk.Label(
+            profile_container, 
+            text="Profile:", 
+            fg=muted, 
+            bg=bg, 
+            font=("Segoe UI", 8)
+        )
+        profile_lbl.pack(side="left", padx=(0, 4))
+        
+        profile_combo = ttk.Combobox(
+            profile_container, 
+            textvariable=self._selected_profile, 
+            width=10, 
+            state="readonly", 
+            values=profile_mgr.available_profiles,
+            font=("Segoe UI", 8)
+        )
+        profile_combo.pack(side="left")
+        
+        def _on_profile_change(event=None):
+            new_profile = self._selected_profile.get()
+            if new_profile != profile_mgr.active_profile:
+                profile_mgr.switch_profile(new_profile)
+                log_to_file(f"[Profile] Switched to: {new_profile}")
+                # Show restart suggestion
+                messagebox.showinfo(
+                    "Profile Changed",
+                    f"Switched to profile: {new_profile}\n\n"
+                    "Restart the application for window sizes to take effect."
+                )
+        
+        profile_combo.bind("<<ComboboxSelected>>", _on_profile_change)
+        
+        # Store profile manager reference
+        self._profile_mgr = profile_mgr
         
         # Restore the progressbar logic
         try:
@@ -6936,12 +6985,19 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             except Exception:
                 pass
             
-            # Position at left 20% of screen
+            # Position using profile settings
+            profile_mgr = get_profile_manager()
             screen_w = activity_win.winfo_screenwidth()
             screen_h = activity_win.winfo_screenheight()
-            win_w = int(screen_w * 0.20)  # 20% width
-            win_h = screen_h
-            activity_win.geometry(f"{win_w}x{win_h}+0+0")
+            
+            # Check for saved geometry first, otherwise use profile defaults
+            saved_geom = profile_mgr.get_window_geometry("parcel_window")
+            if saved_geom:
+                x_pos, y_pos, win_w, win_h = saved_geom
+                activity_win.geometry(f"{win_w}x{win_h}+{x_pos}+{y_pos}")
+            else:
+                win_w, win_h = profile_mgr.get_parcel_window_size(screen_w, screen_h)
+                activity_win.geometry(f"{win_w}x{win_h}+0+0")
             activity_win.configure(bg="#2C3E50")
             
             # Title
@@ -9168,15 +9224,38 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         pending_window.attributes('-topmost', True)  # Always on top
         pending_window.resizable(False, False)
         
-        # Calculate position: upper 35% of left side (to fit parcel automation below)
+        # Get profile manager for window sizing
+        profile_mgr = get_profile_manager()
+        
+        # Calculate position using profile settings
         screen_width = pending_window.winfo_screenwidth()
         screen_height = pending_window.winfo_screenheight()
-        window_width = int(screen_width * 0.20)  # 20% of screen width
-        window_height = int(screen_height * 0.35)  # Upper 35% of screen height
-        x_position = 0  # Left edge
-        y_position = 0  # Top edge
+        
+        # Check for saved geometry first, otherwise use profile defaults
+        saved_geom = profile_mgr.get_window_geometry("pending_window")
+        if saved_geom:
+            x_position, y_position, window_width, window_height = saved_geom
+        else:
+            window_width, window_height = profile_mgr.get_pending_window_size(screen_width, screen_height)
+            x_position = 0  # Left edge
+            y_position = 0  # Top edge
         
         pending_window.geometry(f"{window_width}x{window_height}+{x_position}+{y_position}")
+        
+        # Save geometry when window is moved/resized (for future use)
+        def _save_pending_geometry(event=None):
+            try:
+                geom = pending_window.geometry()
+                # Parse geometry string: WxH+X+Y
+                import re
+                match = re.match(r'(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', geom)
+                if match:
+                    w, h, x, y = map(int, match.groups())
+                    profile_mgr.save_window_geometry("pending_window", x, y, w, h)
+            except Exception:
+                pass
+        
+        pending_window.bind("<Configure>", _save_pending_geometry)
         
         # Window content
         pending_frame = tk.Frame(pending_window, bg=bg, bd=0, highlightthickness=1, highlightbackground="#2A2F35")
