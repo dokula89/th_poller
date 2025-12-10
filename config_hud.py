@@ -22,9 +22,50 @@ import threading
 import re
 import webbrowser
 from tkinter import messagebox
+import mysql.connector
+from mysql.connector import pooling
 
-# Global dictionary to store address match completion callbacks
-ADDRESS_MATCH_CALLBACKS = {}
+# =============================================================================
+# PERSISTENT DATABASE CONNECTION POOL (External DB)
+# =============================================================================
+_EXTERNAL_DB_CONFIG = {
+    'host': '172.104.206.182',
+    'port': 3306,
+    'user': 'seattlelisted_usr',
+    'password': 'T@5z6^pl}',
+    'database': 'offta',
+    'connect_timeout': 10,
+    'autocommit': True
+}
+
+
+# Connection pools (lazy initialized)
+_external_pool = None
+_pool_lock = threading.Lock()
+
+def get_external_db():
+    """Get a connection from the external DB pool (thread-safe, persistent)"""
+    global _external_pool
+    with _pool_lock:
+        if _external_pool is None:
+            try:
+                _external_pool = pooling.MySQLConnectionPool(
+                    pool_name="external_pool",
+                    pool_size=5,
+                    pool_reset_session=True,
+                    **_EXTERNAL_DB_CONFIG
+                )
+                log_to_file("[DB Pool] External DB pool created (5 connections)")
+            except Exception as e:
+                log_to_file(f"[DB Pool] Failed to create external pool: {e}")
+                # Fallback to direct connection
+                return mysql.connector.connect(**_EXTERNAL_DB_CONFIG)
+    try:
+        return _external_pool.get_connection()
+    except Exception as e:
+        log_to_file(f"[DB Pool] Pool exhausted, creating direct connection: {e}")
+        return mysql.connector.connect(**_EXTERNAL_DB_CONFIG)
+
 
 # Global HUD instance (initialized by hud_start())
 _hud: Optional['OldCompactHUD'] = None
@@ -178,20 +219,41 @@ class OldCompactHUD:
                     print(f"[Git Update] {result.stdout}")
                     log_to_file(f"[Git Update] ✓ Updated successfully! {result.stdout}")
                     
-                    # Show notification to user
+                    # Auto-restart the application
                     try:
-                        import tkinter as tk
-                        from tkinter import messagebox
-                        root = tk.Tk()
-                        root.withdraw()
-                        messagebox.showinfo(
-                            "Queue Poller Updated",
-                            f"Queue Poller has been updated with {commits_behind} new commit(s).\n\n"
-                            "Please restart the application to use the latest version."
-                        )
-                        root.destroy()
-                    except Exception:
-                        pass
+                        import sys
+                        import os
+                        print(f"[Git Update] Restarting application...")
+                        log_to_file(f"[Git Update] Restarting application...")
+                        
+                        # Use pythonw for clean restart without console
+                        python_exe = sys.executable
+                        script_path = os.path.abspath(sys.argv[0])
+                        
+                        # Start new process
+                        subprocess.Popen([python_exe, script_path], 
+                                        cwd=repo_dir,
+                                        creationflags=subprocess.CREATE_NEW_CONSOLE)
+                        
+                        # Exit current process
+                        os._exit(0)
+                    except Exception as restart_err:
+                        print(f"[Git Update] Restart failed: {restart_err}")
+                        log_to_file(f"[Git Update] Restart failed: {restart_err}")
+                        # Fall back to showing message
+                        try:
+                            import tkinter as tk
+                            from tkinter import messagebox
+                            temp_root = tk.Tk()
+                            temp_root.withdraw()
+                            messagebox.showinfo(
+                                "Queue Poller Updated",
+                                f"Queue Poller has been updated with {commits_behind} new commit(s).\n\n"
+                                "Please restart the application manually."
+                            )
+                            temp_root.destroy()
+                        except Exception:
+                            pass
                     
                 except subprocess.CalledProcessError as e:
                     error_msg = e.stderr.decode() if e.stderr else str(e)
@@ -284,12 +346,23 @@ class OldCompactHUD:
         
         # Don't use overrideredirect to allow minimizing
         root.title("Queue Poller")
+        
+        # Set position BEFORE setting other attributes
+        root.update_idletasks()
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        window_width = 360
+        window_height = 120
+        
+        # Position at top-right with 700px offset to the left
+        x_pos = sw - window_width - 700
+        y_pos = 0
+        root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
+        
         try: 
             # Allow other windows to be on top - don't set -topmost
             root.wm_attributes("-alpha", self._opacity)
-            # Make it look borderless but still minimizable
-            if os.name == 'nt':  # Windows
-                root.attributes('-toolwindow', True)
+            # Don't use -toolwindow as it can cause always-on-top behavior on Windows
             root.resizable(False, False)
         except Exception: pass
 
@@ -396,6 +469,8 @@ class OldCompactHUD:
         def connect_vpn():
             """Connect to VPN based on selected metro"""
             import subprocess
+            import sys
+            import os
             try:
                 vpn_location_var.set("Connecting...")
                 vpn_btn.config(text="VPN", bg="#F39C12")  # Orange for connecting
@@ -407,54 +482,70 @@ class OldCompactHUD:
                 vpn_city = METRO_TO_VPN_CITY.get(selected_metro, "seattle")
                 
                 log_to_file(f"[VPN] Connecting to {vpn_city} (metro: {selected_metro})...")
-                log_to_file(f"[VPN] Command: nordvpn connect {vpn_city}")
                 
-                # Connect to specific city
-                result = subprocess.run(["nordvpn", "connect", vpn_city], 
-                                      capture_output=True, text=True, shell=True, timeout=30)
+                # Use our nordvpn_controller.py script
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                python_exe = sys.executable
+                controller_path = os.path.join(script_dir, "nordvpn_controller.py")
+                
+                log_to_file(f"[VPN] Using controller: {controller_path}")
+                log_to_file(f"[VPN] Python: {python_exe}")
+                
+                # Connect to specific city using our controller
+                result = subprocess.run([python_exe, controller_path, "connect", vpn_city], 
+                                      capture_output=True, text=True, timeout=30)
                 
                 log_to_file(f"[VPN] Connect command return code: {result.returncode}")
-                log_to_file(f"[VPN] Connect stdout: {result.stdout[:1000]}")
-                log_to_file(f"[VPN] Connect stderr: {result.stderr[:1000]}")
+                log_to_file(f"[VPN] Connect stdout: {result.stdout[:1000] if result.stdout else 'None'}")
+                log_to_file(f"[VPN] Connect stderr: {result.stderr[:1000] if result.stderr else 'None'}")
                 
-                # Check if command succeeded
-                if result.returncode != 0:
-                    log_to_file(f"[VPN] Connect command failed with code {result.returncode}")
-                    error_msg = result.stderr or result.stdout or "Unknown error"
-                    log_to_file(f"[VPN] Error message: {error_msg}")
+                # Wait for connection to establish and check status multiple times
+                log_to_file(f"[VPN] Waiting for connection to establish...")
+                vpn_location_var.set("Verifying connection...")
+                
+                max_attempts = 6
+                for attempt in range(max_attempts):
+                    time.sleep(3)
+                    log_to_file(f"[VPN] Checking connection status (attempt {attempt+1}/{max_attempts})...")
                     
-                    # Check if NordVPN is not installed
-                    if "not recognized" in error_msg.lower() or "not found" in error_msg.lower():
-                        vpn_location_var.set("Not installed")
-                        vpn_btn.config(text="VPN", bg="#E74C3C")
-                        vpn_connected[0] = False
+                    status_result = subprocess.run([python_exe, controller_path, "status"], 
+                                                 capture_output=True, text=True, timeout=10)
+                    
+                    if status_result.returncode == 0:
+                        output = status_result.stdout
+                        log_to_file(f"[VPN] Status output: {output[:500]}")
                         
-                        # Show installation dialog
-                        self._root.after(0, lambda: show_nordvpn_install_dialog())
-                        return
-                    
-                    vpn_location_var.set("Connection error")
-                    vpn_btn.config(text="VPN", bg="#E74C3C")
-                    vpn_connected[0] = False
-                    return
+                        # Parse the status output
+                        connected = "connected: True" in output
+                        
+                        if connected:
+                            vpn_connected[0] = True
+                            
+                            # Extract IP and location from output
+                            ip = "Unknown"
+                            location = "Unknown"
+                            for line in output.split('\n'):
+                                if 'ip:' in line.lower():
+                                    ip = line.split(':', 1)[1].strip()
+                                if 'location:' in line.lower():
+                                    location = line.split(':', 1)[1].strip()
+                            
+                            display_text = f"{ip} ({vpn_city})"
+                            vpn_location_var.set(display_text)
+                            vpn_btn.config(text="VPN", bg="#27AE60")  # Green for connected
+                            log_to_file(f"[VPN] Successfully connected: {display_text}")
+                            return  # Exit early on success
+                        else:
+                            log_to_file(f"[VPN] Not connected yet, waiting...")
+                            vpn_location_var.set(f"Connecting ({attempt+1}/{max_attempts})...")
+                    else:
+                        log_to_file(f"[VPN] Status check failed with code {status_result.returncode}")
                 
-                # Wait a moment for connection to establish
-                log_to_file(f"[VPN] Waiting 2 seconds for connection to establish...")
-                time.sleep(2)
-                
-                # Get updated status
-                log_to_file(f"[VPN] Checking connection status...")
-                connected, location = get_vpn_status()
-                vpn_connected[0] = connected
-                
-                if connected:
-                    vpn_location_var.set(location)
-                    vpn_btn.config(text="VPN", bg="#27AE60")  # Green for connected
-                    log_to_file(f"[VPN] Successfully connected: {location}")
-                else:
-                    vpn_location_var.set("Connection failed")
-                    vpn_btn.config(text="VPN", bg="#E74C3C")  # Red for failed
-                    log_to_file(f"[VPN] Connection failed - status check returned not connected")
+                # If we get here, connection failed
+                vpn_location_var.set("Connection timeout")
+                vpn_btn.config(text="VPN", bg="#E74C3C")  # Red for failed
+                vpn_connected[0] = False
+                log_to_file(f"[VPN] Connection failed after {max_attempts} attempts")
                     
             except subprocess.TimeoutExpired:
                 vpn_location_var.set("Connection timeout")
@@ -469,19 +560,27 @@ class OldCompactHUD:
         def disconnect_vpn():
             """Disconnect from VPN"""
             import subprocess
+            import sys
+            import os
             try:
                 log_to_file(f"[VPN] Disconnecting from VPN...")
                 vpn_location_var.set("Disconnecting...")
                 vpn_btn.config(text="VPN", bg="#F39C12")
                 
-                log_to_file(f"[VPN] Command: nordvpn disconnect")
-                result = subprocess.run(["nordvpn", "disconnect"], capture_output=True, text=True, shell=True, timeout=10)
+                # Use our nordvpn_controller.py script
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                python_exe = sys.executable
+                controller_path = os.path.join(script_dir, "nordvpn_controller.py")
+                
+                log_to_file(f"[VPN] Using controller: {controller_path}")
+                result = subprocess.run([python_exe, controller_path, "disconnect"], 
+                                      capture_output=True, text=True, timeout=10)
                 
                 log_to_file(f"[VPN] Disconnect command return code: {result.returncode}")
-                log_to_file(f"[VPN] Disconnect stdout: {result.stdout[:500]}")
-                log_to_file(f"[VPN] Disconnect stderr: {result.stderr[:500]}")
+                log_to_file(f"[VPN] Disconnect stdout: {result.stdout[:500] if result.stdout else 'None'}")
+                log_to_file(f"[VPN] Disconnect stderr: {result.stderr[:500] if result.stderr else 'None'}")
                 
-                time.sleep(1)
+                time.sleep(2)
                 
                 vpn_connected[0] = False
                 vpn_location_var.set("Not connected")
@@ -589,6 +688,31 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             else:
                 threading.Thread(target=connect_vpn, daemon=True).start()
         
+        # Poller button (to show/hide pending jobs window)
+        poller_btn = tk.Label(header, text="Poller", fg="#FFFFFF", bg="#3498DB", font=("Segoe UI", 9, "bold"), padx=8, pady=2, cursor="hand2")
+        poller_btn.pack(side="right", padx=(6, 0))
+        
+        def toggle_poller():
+            """Toggle pending jobs window visibility"""
+            if hasattr(self, '_pending_window_visible') and self._pending_window_visible:
+                # Hide window
+                if hasattr(self, '_pending_window') and self._pending_window.winfo_exists():
+                    self._pending_window.withdraw()
+                    self._pending_window_visible = False
+                    poller_btn.config(bg="#95A5A6")
+                    log_to_file("[Poller] Window hidden")
+            else:
+                # Show window
+                if hasattr(self, '_pending_window') and self._pending_window.winfo_exists():
+                    self._pending_window.deiconify()
+                    self._pending_window_visible = True
+                    poller_btn.config(bg="#3498DB")
+                    log_to_file("[Poller] Window shown")
+        
+        poller_btn.bind("<Button-1>", lambda e: toggle_poller())
+        poller_btn.bind("<Enter>", lambda e: poller_btn.config(bg="#5DADE2"))
+        poller_btn.bind("<Leave>", lambda e: poller_btn.config(bg="#3498DB" if getattr(self, '_pending_window_visible', True) else "#95A5A6"))
+        
         vpn_frame = tk.Frame(header, bg=bg)
         vpn_frame.pack(side="right", padx=(6, 0))
         vpn_btn = tk.Label(vpn_frame, text="VPN", fg="#FFFFFF", bg="#34495E", font=("Segoe UI", 9, "bold"), padx=8, pady=2, cursor="hand2")
@@ -691,52 +815,6 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         extractor_btn.bind("<Enter>", lambda e: extractor_btn.config(bg="#BB79D6"))
         extractor_btn.bind("<Leave>", lambda e: extractor_btn.config(bg="#9B59B6"))
 
-        # Sync DB button - uploads tables to remote server
-        sync_btn = tk.Label(actions, text="🔄 Sync DB", fg=bg, bg="#16A085", font=("Segoe UI", 9, "bold"), padx=8, pady=2, cursor="hand2")
-        sync_btn.pack(side="left", padx=(6, 0))
-        sync_btn.bind("<Enter>", lambda e: sync_btn.config(bg="#1ABC9C"))
-        sync_btn.bind("<Leave>", lambda e: sync_btn.config(bg="#16A085"))
-        
-        # Update sync button with stats
-        def update_sync_button_stats():
-            try:
-                import mysql.connector
-                conn = mysql.connector.connect(
-                    host='127.0.0.1',
-                    user='root',
-                    password='',
-                    database='offta'
-                )
-                cursor = conn.cursor(dictionary=True)
-                
-                # Count addresses without 911_json
-                cursor.execute("""
-                    SELECT COUNT(*) as count 
-                    FROM google_addresses 
-                    WHERE (911_json IS NULL OR 911_json = '') 
-                    AND latitude IS NOT NULL 
-                    AND longitude IS NOT NULL
-                """)
-                result = cursor.fetchone()
-                unsynced = result['count'] if result else 0
-                
-                cursor.close()
-                conn.close()
-                
-                if unsynced > 0:
-                    sync_btn.config(text=f"🔄 Sync DB ({unsynced})")
-                else:
-                    sync_btn.config(text="🔄 Sync DB ✓")
-            except Exception as e:
-                log_to_file(f"[Sync Stats] Error updating button: {e}")
-        
-        # Initial stats update
-        try:
-            update_sync_button_stats()
-        except:
-            pass
-
-        # Expenses button - shows API usage tracking
         expenses_btn = tk.Label(actions, text="💰 Expenses", fg=bg, bg="#F39C12", font=("Segoe UI", 9, "bold"), padx=8, pady=2, cursor="hand2")
         expenses_btn.pack(side="left", padx=(6, 0))
         expenses_btn.bind("<Enter>", lambda e: expenses_btn.config(bg="#FFB84D"))
@@ -976,6 +1054,74 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             self._metro_pb.pack(side="left", padx=(6, 0))
             # Hide initially
             self._metro_pb.stop()
+        except Exception:
+            self._metro_pb = None
+        
+        # Version display row (below metro selector)
+        version_row = tk.Frame(body, bg=bg)
+        version_row.pack(fill="x", pady=(0, 4))
+        
+        def _get_versions():
+            """Get local and remote versions"""
+            from pathlib import Path
+            repo_dir = Path(__file__).parent
+            version_file = repo_dir / "VERSION"
+            
+            local_version = "?.?.?"
+            remote_version = "?.?.?"
+            
+            # Read local version
+            try:
+                if version_file.exists():
+                    local_version = version_file.read_text().strip()
+            except Exception:
+                pass
+            
+            # Get remote version
+            try:
+                result = subprocess.run(
+                    ["git", "show", "origin/main:VERSION"],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    timeout=10,
+                    text=True
+                )
+                if result.returncode == 0:
+                    remote_version = result.stdout.strip()
+            except Exception:
+                pass
+            
+            return local_version, remote_version
+        
+        local_ver, remote_ver = _get_versions()
+        
+        # Version status indicator
+        if local_ver == remote_ver:
+            version_color = "#2ECC71"  # Green - up to date
+            version_icon = "✓"
+        else:
+            version_color = "#E74C3C"  # Red - needs update
+            version_icon = "⚠"
+        
+        version_container = tk.Frame(version_row, bg=bg)
+        version_container.pack(side="right")
+        
+        self._version_lbl = tk.Label(
+            version_container, 
+            text=f"{version_icon} v{local_ver}", 
+            fg=version_color, 
+            bg=bg, 
+            font=("Segoe UI", 8)
+        )
+        self._version_lbl.pack(side="right")
+        
+        # Store versions for later reference
+        self._local_version = local_ver
+        self._remote_version = remote_ver
+        
+        # Restore the progressbar logic
+        try:
+            pass  # Progressbar already created above
             self._metro_pb.pack_forget()
         except Exception:
             self._metro_pb = None
@@ -1035,11 +1181,6 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         
         # Stats chips removed - not showing data
 
-        root.update_idletasks()
-        sw = root.winfo_screenwidth()
-        x_pos = int(sw * 0.20)  # 20% from left edge
-        root.geometry(f"360x120+{x_pos}+0")  # Position at top of screen
-
         # Drag
         def start_move(e):
             root._x, root._y = e.x, e.y
@@ -1082,8 +1223,13 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         root.deiconify()
                         # Re-apply positioning after showing window
                         sw = root.winfo_screenwidth()
-                        x_pos = int(sw * 0.20)  # 20% from left edge
-                        root.geometry(f"360x120+{x_pos}+0")  # Position at top of screen
+                        window_width = 360
+                        window_height = 120
+                        
+                        # Position at top-right with 700px offset to the left
+                        x_pos = sw - window_width - 700
+                        root.geometry(f"{window_width}x{window_height}+{x_pos}+0")
+                        
                         root.lift()
                         root.focus_force()
                         root.update()
@@ -1151,27 +1297,14 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         self._date_combo.pack(side="left")
         self._date_combo.current(0)
         
-        # Load dates from database in background
+        # Generate last 30 days as date options (no DB query needed)
         def _load_dates():
             try:
-                import mysql.connector
-                conn = mysql.connector.connect(
-                    host='localhost',
-                    port=3306,
-                    user='root',
-                    password='',
-                    database='offta',
-                    connect_timeout=10
-                )
-                cursor = conn.cursor()
-                cursor.execute("SELECT DISTINCT date FROM network_daily_stats ORDER BY date DESC LIMIT 30")
-                dates = [str(row[0]) for row in cursor.fetchall()]
-                cursor.close()
-                conn.close()
-                
-                # Always ensure today's date is in the list (even if no data exists yet)
-                if today_str not in dates:
-                    dates.insert(0, today_str)  # Add today at the beginning
+                from datetime import datetime, timedelta
+                dates = []
+                for i in range(30):
+                    d = datetime.now() - timedelta(days=i)
+                    dates.append(d.strftime("%Y-%m-%d"))
                 
                 def _update_dates():
                     # Preserve current selection
@@ -1185,9 +1318,9 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         self._date_combo.set(today_str)
                 
                 self._root.after(0, _update_dates)
-                log_to_file(f"[Queue] Loaded {len(dates)} dates from network_daily_stats (today always included)")
+                log_to_file(f"[Queue] Generated {len(dates)} dates (last 30 days)")
             except Exception as e:
-                log_to_file(f"[Queue] Failed to load dates: {e}")
+                log_to_file(f"[Queue] Failed to generate dates: {e}")
         
         threading.Thread(target=_load_dates, daemon=True).start()
         
@@ -1275,7 +1408,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 # Query database for parcel link
                                 try:
                                     import mysql.connector
-                                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta')
+                                    conn = get_external_db()
                                     cursor = conn.cursor(dictionary=True)
                                     # Get metro from dropdown
                                     metro = self._metro_combo.get() if hasattr(self, '_metro_combo') else 'Seattle'
@@ -1497,8 +1630,8 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 
                 # Create new tree with appropriate columns
                 if is_parcel:
-                    cols = ("ID", "Address", "Metro", "Image", "✏️")
-                    log_to_file(f"[Queue] Creating Parcel tree with 5 columns: {cols}")
+                    cols = ("ID", "Address", "Network", "Metro", "Image", "✏️")
+                    log_to_file(f"[Queue] Creating Parcel tree with 6 columns: {cols}")
                 else:
                     cols = ("ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "▶️", "✏️", "hidden1", "hidden2", "hidden3")
                     log_to_file(f"[Queue] Creating standard tree with 16 columns")
@@ -1526,8 +1659,8 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 
                 # Configure columns with proper labels and widths
                 if is_parcel:
-                    labels = ["ID", "Address", "Metro", "Link", "Data", "✏️"]
-                    widths = [60, 400, 100, 60, 80, 30]
+                    labels = ["ID", "Address", "Network", "Metro", "Link", "Data", "✏️"]
+                    widths = [60, 300, 80, 100, 60, 80, 30]
                 else:
                     labels = ["ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "✏️", "", ""]
                     widths = [40, 200, 80, 40, 70, 70, 50, 40, 35, 35, 50, 30, 0, 0]
@@ -1819,8 +1952,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     "#7": "create_json",        # 2.JSON
                     "#8": "manual_match",       # 3.Extract (download/extract images)
                     "#9": "process_db",         # 4.Upload (upload images to server)
-                    "#10": "insert_db",          # 5.Insert DB
-                    "#11": "address_match"       # 6.Address Match
+                    "#10": "insert_db"           # 5.Insert DB
                 }
                 
                 # Handle ID column click (column #1) - open Activity Window
@@ -1896,7 +2028,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         try:
                             # Check if Availability_Website exists
                             import mysql.connector
-                            conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                            conn = get_external_db()
                             cursor = conn.cursor()
                             cursor.execute("SELECT availability_website, Website, Name FROM google_places WHERE id = %s", (job_id,))
                             result = cursor.fetchone()
@@ -2006,13 +2138,29 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         "Step 2: Create JSON",
                         "Step 3: Extract Data",
                         "Step 4: Upload",
-                        "Step 5: Insert DB",
-                        "Step 6: Address Match"
+                        "Step 5: Insert DB"
                     ]
                     status_win = tk.Toplevel(self._queue_tree)
                     # Simple window title: Job X - Activity Monitor
                     status_win.title(f"Job {job_id} - Activity Monitor")
                     status_win.geometry(f"{window_width}x{window_height}+0+0")  # 20% width, 96% height at top-left (0,0)
+                    
+                    # Lower the Queue Poller window so Activity Monitor is on top
+                    try:
+                        root.lower()
+                        status_win.lift()
+                        status_win.focus_force()
+                    except Exception:
+                        pass
+                    
+                    # When Activity Monitor closes, raise Queue Poller back
+                    def on_status_win_close():
+                        try:
+                            root.lift()
+                        except Exception:
+                            pass
+                        status_win.destroy()
+                    status_win.protocol("WM_DELETE_WINDOW", on_status_win_close)
                     
                     # --- Per-job stats for Networks Summary column ---
                     job_stats = {
@@ -2028,14 +2176,14 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         'total_time_sec': 0,
                     }
 
-                    # Helper function to get network_id from queue_websites
+                    # Helper function to get network_id from queue_websites (REMOTE DB)
                     def get_network_id():
-                        """Get network_id from queue_websites.source_table"""
+                        """Get network_id from queue_websites.source_table on remote DB"""
                         try:
                             import mysql.connector
-                            conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                            conn = get_external_db()
                             cursor = conn.cursor()
-                            cursor.execute("SELECT source_table FROM queue_websites WHERE id = %s", (job_id,))
+                            cursor.execute("SELECT source_id FROM queue_websites WHERE id = %s", (job_id,))
                             result = cursor.fetchone()
                             cursor.close()
                             conn.close()
@@ -2045,7 +2193,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 except:
                                     return None
                         except Exception as db_err:
-                            log_to_file(f"[Queue] Failed to get network_id: {db_err}")
+                            log_to_file(f"[Queue] Failed to get network_id from remote: {db_err}")
                         return None
 
                     def _fmt_total(sec):
@@ -2211,8 +2359,6 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 threading.Thread(target=lambda: execute_step_4(step_idx, auto_continue=False), daemon=True).start()
                             elif step_idx == 4:
                                 threading.Thread(target=lambda: execute_step_5(step_idx, auto_continue=False), daemon=True).start()
-                            elif step_idx == 5:
-                                threading.Thread(target=lambda: execute_step_6(step_idx, auto_continue=False), daemon=True).start()
                         return handler
                     
                     for i, btn_label in enumerate(button_labels):
@@ -2227,13 +2373,13 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     overall_progress_frame = tk.Frame(main_frame, bg="#1e1e1e")
                     overall_progress_frame.pack(fill="x", padx=10, pady=(5,5))
                     
-                    overall_progress_label = tk.Label(overall_progress_frame, text="Step 0/6 - Ready", 
+                    overall_progress_label = tk.Label(overall_progress_frame, text="Step 0/5 - Ready", 
                                                       bg="#1e1e1e", fg="#aaa", font=("Consolas", 8))
                     overall_progress_label.pack()
                     
                     overall_progress_bar = ttk.Progressbar(overall_progress_frame, length=window_width-40, mode='determinate')
                     overall_progress_bar.pack(pady=2)
-                    overall_progress_bar['maximum'] = 6
+                    overall_progress_bar['maximum'] = 5
                     overall_progress_bar['value'] = 0
                     
                     overall_time_label = tk.Label(overall_progress_frame, text="Est. time: calculating...", 
@@ -2349,6 +2495,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     def start_step_timer(idx):
                         """Record the start time for a step"""
                         import time
+                        from datetime import datetime
                         step_start_times[idx] = time.time()
                         now = datetime.now().strftime("%H:%M:%S")
                         set_status_time(idx, f"⏱️ Started: {now}")
@@ -2356,6 +2503,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     def finish_step_timer(idx):
                         """Calculate and display duration for a step"""
                         import time
+                        from datetime import datetime
                         if idx in step_start_times:
                             duration = time.time() - step_start_times[idx]
                             now = datetime.now().strftime("%H:%M:%S")
@@ -2376,8 +2524,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         1: 15,  # Create JSON
                         2: 10,  # Extract Data
                         3: 8,   # Upload
-                        4: 20,  # Insert DB
-                        5: 15   # Address Match
+                        4: 20   # Insert DB
                     }
                     
                     def update_overall_progress(current_step):
@@ -2385,8 +2532,8 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         # current_step is now the step that just completed (0-based index)
                         completed = current_step + 1  # Number of completed steps
                         overall_progress_bar['value'] = completed
-                        remaining_steps = 6 - completed
-                        est_time = sum(avg_step_times[i] for i in range(completed, 6))
+                        remaining_steps = 5 - completed
+                        est_time = sum(avg_step_times[i] for i in range(completed, 5))
                         
                         if est_time < 60:
                             time_str = f"{est_time}s"
@@ -2395,11 +2542,12 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             secs = int(est_time % 60)
                             time_str = f"{mins}m {secs}s"
                         
-                        overall_progress_label.config(text=f"Step {completed}/6 completed")
+                        overall_progress_label.config(text=f"Step {completed}/5 completed")
                         overall_time_label.config(text=f"Est. time remaining: {time_str}")
                     
                     # Run steps with actual functionality
                     def run_steps(idx=0):
+                        import threading
                         # Check if paused before starting next step
                         if is_paused[0]:
                             # Wait and check again
@@ -2431,22 +2579,19 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             except Exception:
                                 pass
                             log_activity(f"\n✅ All steps completed!{total_text}", "#00ff00")
-                            overall_progress_bar['value'] = 6
-                            overall_progress_label.config(text="Step 6/6 - Complete ✅", fg="#00ff00")
+                            overall_progress_bar['value'] = 5
+                            overall_progress_label.config(text="Step 5/5 - Complete ✅", fg="#00ff00")
                             overall_time_label.config(text=f"All done!{(' ' + total_text.strip()) if total_text else ''}")
-                            # Show total workflow time in Step 6 summary
+                            # Show total workflow time in Step 5 summary
                             try:
                                 time_clean = total_text.replace(' (Total: ', '').replace(')', '')
-                                set_status_summary(5, f"🏁 Workflow complete! Total time: {time_clean}", "#00ff00")
+                                set_status_summary(4, f"🏁 Workflow complete! Total time: {time_clean}", "#00ff00")
                             except Exception:
                                 pass
                             
-                            # Update status in appropriate table (queue_websites or google_places)
+                            # Update status in appropriate table (queue_websites on EXTERNAL or google_places on LOCAL)
                             try:
-                                import mysql.connector
                                 from datetime import datetime
-                                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
-                                cursor = conn.cursor()
                                 now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                                 
                                 is_websites = str(table).lower() in ('listing_websites', 'websites')
@@ -2454,13 +2599,14 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                     # For Websites tab, we don't update status (google_places doesn't have status column)
                                     log_to_file(f"[Queue] ✓ Websites tab job {job_id} completed (no status update needed)")
                                 else:
-                                    # For Networks tab, update queue_websites
+                                    # For Networks tab, update queue_websites on EXTERNAL DB
+                                    conn = get_external_db()
+                                    cursor = conn.cursor()
                                     cursor.execute("UPDATE queue_websites SET status = %s, processed_at = %s WHERE id = %s", ("done", now_str, job_id))
                                     conn.commit()
+                                    cursor.close()
+                                    conn.close()
                                     log_to_file(f"[Queue] ✓ Updated queue_websites: status='done', processed_at='{now_str}' for job {job_id}")
-                                
-                                cursor.close()
-                                conn.close()
                             except Exception as db_err:
                                 log_to_file(f"[Queue] ⚠️ Failed to update status: {db_err}")
                             
@@ -2493,8 +2639,6 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             threading.Thread(target=lambda: execute_step_4(idx), daemon=True).start()
                         elif idx == 4:  # Step 5: Insert DB
                             threading.Thread(target=lambda: execute_step_5(idx), daemon=True).start()
-                        elif idx == 5:  # Step 6: Address Match
-                            threading.Thread(target=lambda: execute_step_6(idx), daemon=True).start()
                     
                     def execute_step_1(idx, auto_continue=True):
                         """Step 1: Fetch HTML - Get link and CSS from appropriate table based on current tab"""
@@ -2504,14 +2648,13 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             
                             # Determine which table to query based on current tab
                             import mysql.connector
-                            conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
-                            cursor = conn.cursor()
-                            
                             # Check if we're on Websites tab
                             is_websites = str(table).lower() in ('listing_websites', 'websites')
                             
                             if is_websites:
-                                # Query google_places table for Websites tab
+                                # Query google_places table for Websites tab (LOCAL DB)
+                                conn = get_external_db()
+                                cursor = conn.cursor()
                                 cursor.execute("SELECT Website FROM google_places WHERE id = %s", (job_id,))
                                 result = cursor.fetchone()
                                 cursor.close()
@@ -2524,14 +2667,16 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 the_css = None  # Websites don't have CSS selector
                                 capture_mode = 'headless'
                             else:
-                                # Query queue_websites table for Networks tab
+                                # Query queue_websites table for Networks tab (REMOTE DB)
+                                conn = get_external_db()
+                                cursor = conn.cursor()
                                 cursor.execute("SELECT link, the_css, capture_mode FROM queue_websites WHERE id = %s", (job_id,))
                                 result = cursor.fetchone()
                                 cursor.close()
                                 conn.close()
                                 
                                 if not result:
-                                    raise Exception(f"Job {job_id} not found in queue_websites")
+                                    raise Exception(f"Job {job_id} not found in queue_websites (remote)")
                                 
                                 link = result[0]
                                 the_css = result[1] if len(result) > 1 else None
@@ -2569,7 +2714,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 # Update status in appropriate table
                                 try:
                                     import mysql.connector
-                                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                    conn = get_external_db()
                                     cursor = conn.cursor()
                                     
                                     is_websites = str(table).lower() in ('listing_websites', 'websites')
@@ -2595,7 +2740,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 status_win.after(0, lambda: log_activity(f"🔄 Detected 403 Forbidden - switching to 'browser' mode and retrying...", "#FFA500"))
                                 try:
                                     import mysql.connector
-                                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                    conn = get_external_db()
                                     cursor = conn.cursor()
                                     cursor.execute("UPDATE queue_websites SET capture_mode = %s WHERE id = %s", ("browser", job_id))
                                     conn.commit()
@@ -2616,7 +2761,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             # Update status in appropriate table with error message (second location)
                             try:
                                 import mysql.connector
-                                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                conn = get_external_db()
                                 cursor = conn.cursor()
                                 
                                 is_websites = str(table).lower() in ('listing_websites', 'websites')
@@ -2636,6 +2781,8 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     def execute_step_2(idx, auto_continue=True):
                         """Step 2: Create JSON"""
                         try:
+                            from datetime import datetime
+                            import os
                             status_win.after(0, lambda: log_activity("Creating JSON...", "#aaa"))
                             # Determine the expected JSON filename based on table
                             date_str = datetime.now().strftime("%Y-%m-%d")
@@ -2668,7 +2815,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 # Update status in appropriate table
                                 try:
                                     import mysql.connector
-                                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                    conn = get_external_db()
                                     cursor = conn.cursor()
                                     
                                     is_websites = str(table).lower() in ('listing_websites', 'websites')
@@ -2685,60 +2832,268 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 status_win.after(0, lambda: finish_step_timer(idx))
                                 return
                             candidate_path = os.path.join(today_captures_dir, json_filename)
-                            # Run PHP script headlessly via requests
+                            
+                            # Parse HTML with BeautifulSoup and extract listings (Python-based, no PHP)
+                            status_win.after(0, lambda: log_activity(f"  Parsing HTML with BeautifulSoup...", "#aaa"))
+                            
                             try:
-                                import requests
-                                import urllib.parse
-                                php_api_url = php_url("process_html_with_openai.php")
-                                params = {
-                                    "file": html_path,
-                                    "model": "gpt-4o-mini",
-                                    "method": "local",
-                                    "process": "1",
-                                    "headless": "1"
-                                }
-                                encoded_params = urllib.parse.urlencode(params)
-                                full_url = f"{php_api_url}?{encoded_params}"
-                                status_win.after(0, lambda u=full_url: log_activity(f"  API: {u}", "#aaa"))
-                                status_win.after(0, lambda: log_activity(f"  Triggering PHP (headless)...", "#aaa"))
-                                resp = requests.get(full_url, timeout=60)
-                                status_win.after(0, lambda: log_activity(f"  PHP response: {resp.status_code}", "#aaa"))
-                                if resp.status_code == 200:
-                                    status_win.after(0, lambda: log_activity(f"  ✓ PHP processing complete", "#00ff00"))
-                                else:
-                                    status_win.after(0, lambda: log_activity(f"  ⚠️ PHP returned: {resp.status_code}", "#ffaa00"))
-                            except Exception as php_err:
-                                status_win.after(0, lambda e=str(php_err): log_activity(f"❌ PHP request failed: {e}", "#ff0000"))
-                            # Now wait for the JSON file to be created (poll for up to 30 seconds)
-                            import time
-                            max_wait = 30  # Maximum 30 seconds
-                            waited = 0
-                            status_win.after(0, lambda jf=json_filename: log_activity(f"  Waiting for: {jf}", "#aaa"))
-                            while waited < max_wait:
-                                if os.path.exists(candidate_path) and os.path.isfile(candidate_path):
-                                    time.sleep(1)
-                                    json_path = candidate_path
-                                    break
-                                time.sleep(1)
-                                waited += 1
-                                if waited % 5 == 0:
-                                    status_win.after(0, lambda w=waited: log_activity(f"  Still waiting... ({w}s)", "#aaa"))
-                            
-                            # Try to find the JSON file in TODAY'S folder only and count listings
-                            listing_count = 0
-                            
-                            if json_path and os.path.exists(json_path):
-                                # Try to count listings in JSON
-                                try:
-                                    import json
-                                    with open(json_path, 'r', encoding='utf-8') as f:
-                                        data = json.load(f)
-                                        if isinstance(data, list):
-                                            listing_count = len(data)
-                                        elif isinstance(data, dict) and 'listings' in data:
-                                            listing_count = len(data['listings'])
-                                except Exception as parse_err:
-                                    status_win.after(0, lambda e=str(parse_err): log_activity(f"  ⚠️ JSON parse error: {e}", "#ff0000"))
+                                from bs4 import BeautifulSoup
+                                import json
+                                import re
+                                
+                                with open(html_path, 'r', encoding='utf-8') as f:
+                                    html_content = f.read()
+                                
+                                soup = BeautifulSoup(html_content, 'html.parser')
+                                listings = []
+                                
+                                # Find listing cards - AppFolio uses div.js-listing-item as the main container
+                                # IMPORTANT: Use specific selector to avoid matching nested elements
+                                cards = soup.select("div.js-listing-item")
+                                
+                                if not cards:
+                                    # Try AppFolio listing-item with result class
+                                    cards = soup.select("div.listing-item.result")
+                                
+                                if not cards:
+                                    # Fallback to other common patterns (but be specific to avoid nested matches)
+                                    cards = soup.select("div.listing-card, div.property-card, article.listing")
+                                
+                                status_win.after(0, lambda c=len(cards): log_activity(f"  Found {c} listing cards", "#aaa"))
+                                
+                                for idx_card, card in enumerate(cards, 1):
+                                    listing = {
+                                        "result_number": idx_card,
+                                        "network_id": job_id,
+                                        "listing_id": None,
+                                        "title": None,
+                                        "unit_name": None,
+                                        "bedrooms": None,
+                                        "bathrooms": None,
+                                        "price": None,
+                                        "sqft": None,
+                                        "available_date": None,
+                                        "full_address": None,
+                                        "google_address": None,
+                                        "street": None,
+                                        "city": None,
+                                        "state": None,
+                                        "img_urls": None,
+                                        "detail_page_link": None,
+                                        "apply_now_link": None,
+                                    }
+                                    
+                                    text = card.get_text(" ", strip=True)
+                                    
+                                    # Extract title - AppFolio uses .js-listing-title or .listing-item__title
+                                    title_elem = card.select_one(".js-listing-title a, .js-listing-title, .listing-item__title a, .listing-item__title, h2, h3")
+                                    if title_elem:
+                                        listing["title"] = title_elem.get_text(strip=True)
+                                    
+                                    # Extract address - AppFolio uses .js-listing-address
+                                    addr_elem = card.select_one(".js-listing-address, [class*='address']")
+                                    if addr_elem:
+                                        addr_text = addr_elem.get_text(strip=True)
+                                        # Remove "Map" link text if present
+                                        addr_text = re.sub(r'\s*Map$', '', addr_text).strip()
+                                        listing["full_address"] = addr_text
+                                        # Try to parse city, state, zip
+                                        parts = addr_text.split(',')
+                                        if len(parts) >= 2:
+                                            listing["street"] = parts[0].strip()
+                                            # Last part typically has "City, ST ZIP"
+                                            city_state_zip = parts[-1].strip()
+                                            state_zip_match = re.search(r'([A-Za-z\s]+),?\s*([A-Z]{2})\s*(\d{5})?', city_state_zip)
+                                            if state_zip_match:
+                                                listing["city"] = state_zip_match.group(1).strip()
+                                                listing["state"] = state_zip_match.group(2)
+                                            elif len(parts) >= 3:
+                                                listing["city"] = parts[-2].strip()
+                                                listing["state"] = city_state_zip.split()[0] if city_state_zip else "WA"
+                                    
+                                    # If no address found, try title as address
+                                    if not listing["full_address"] and listing["title"]:
+                                        if re.search(r'\d+.*\b(st|ave|rd|blvd|way|dr|ln|ct|pl)\b', listing["title"], re.I):
+                                            listing["full_address"] = listing["title"]
+                                    
+                                    # Extract price - first try specific AppFolio element
+                                    price_elem = card.select_one(".detail-box__value, .js-listing-blurb-rent, .sidebar__price")
+                                    if price_elem:
+                                        price_text = price_elem.get_text(strip=True)
+                                        if '$' in price_text:
+                                            listing["price"] = price_text
+                                    
+                                    # Fallback to regex if no price found
+                                    if not listing["price"]:
+                                        price_patterns = [r'\$[\d,]+\.?\d*']
+                                        for pattern in price_patterns:
+                                            price_match = re.search(pattern, text, re.I)
+                                            if price_match:
+                                                listing["price"] = price_match.group(0)
+                                                break
+                                    
+                                    # Extract bed/bath - AppFolio uses ".js-listing-blurb-bed-bath" or detail-box 
+                                    bed_bath_elem = card.select_one(".js-listing-blurb-bed-bath")
+                                    if bed_bath_elem:
+                                        bed_bath_text = bed_bath_elem.get_text(strip=True)
+                                        # Format: "1 bd / 1 ba"
+                                        bed_match = re.search(r'(\d+)\s*bd', bed_bath_text, re.I)
+                                        bath_match = re.search(r'(\d+(?:\.\d+)?)\s*ba', bed_bath_text, re.I)
+                                        if bed_match:
+                                            listing["bedrooms"] = bed_match.group(1)
+                                        if bath_match:
+                                            listing["bathrooms"] = bath_match.group(1)
+                                    
+                                    # Fallback: look in detail-box for Bed / Bath
+                                    if not listing["bedrooms"]:
+                                        detail_items = card.select(".detail-box__item")
+                                        for item in detail_items:
+                                            label = item.select_one(".detail-box__label")
+                                            value = item.select_one(".detail-box__value")
+                                            if label and value:
+                                                label_text = label.get_text(strip=True).lower()
+                                                value_text = value.get_text(strip=True)
+                                                if 'bed' in label_text or 'bath' in label_text:
+                                                    # "1 bd / 1 ba"
+                                                    bed_match = re.search(r'(\d+)\s*bd', value_text, re.I)
+                                                    bath_match = re.search(r'(\d+(?:\.\d+)?)\s*ba', value_text, re.I)
+                                                    if bed_match:
+                                                        listing["bedrooms"] = bed_match.group(1)
+                                                    if bath_match:
+                                                        listing["bathrooms"] = bath_match.group(1)
+                                                elif 'square' in label_text or 'sqft' in label_text or 'sq ft' in label_text:
+                                                    listing["sqft"] = value_text.replace(',', '')
+                                                elif 'available' in label_text:
+                                                    listing["available_date"] = value_text
+                                    
+                                    # Fallback regex for sqft if not found in detail-box
+                                    if not listing["sqft"]:
+                                        # Look for "Square Feet: 720" pattern
+                                        sqft_elem = card.select_one(".js-listing-square-feet")
+                                        if sqft_elem:
+                                            sqft_text = sqft_elem.get_text(strip=True)
+                                            sqft_match = re.search(r'([\d,]+)', sqft_text)
+                                            if sqft_match:
+                                                listing["sqft"] = sqft_match.group(1).replace(',', '')
+                                        else:
+                                            sqft_match = re.search(r'([\d,]+)\s*(?:sq\.?\s*ft|sqft|sf)', text, re.I)
+                                            if sqft_match:
+                                                listing["sqft"] = sqft_match.group(1).replace(',', '')
+                                    
+                                    # Extract available date if not already found
+                                    if not listing["available_date"]:
+                                        avail_elem = card.select_one(".js-listing-available")
+                                        if avail_elem:
+                                            avail_text = avail_elem.get_text(strip=True)
+                                            # Remove "Available" prefix
+                                            avail_text = re.sub(r'^Available\s*', '', avail_text, flags=re.I).strip()
+                                            listing["available_date"] = avail_text
+                                    
+                                    # Extract image URL - prefer data-original (real image), fallback to src (placeholder)
+                                    img = card.select_one(".js-listing-image, img.listing-item__image, img[data-original]")
+                                    if img:
+                                        # Prefer data-original (actual image) over src (placeholder)
+                                        listing["img_urls"] = img.get('data-original') or img.get('data-src') or img.get('src')
+                                    
+                                    # Extract links - look for View Details and Apply Now
+                                    detail_link = card.select_one("a.js-link-to-detail, a[href*='/listings/detail/']")
+                                    if detail_link:
+                                        listing["detail_page_link"] = detail_link.get('href')
+                                    
+                                    apply_link = card.select_one("a[href*='rental_applications'], a.js-apply-link")
+                                    if apply_link:
+                                        listing["apply_now_link"] = apply_link.get('href')
+                                    
+                                    # Fallback: scan all links
+                                    if not listing["detail_page_link"] or not listing["apply_now_link"]:
+                                        links = card.select("a[href]")
+                                        for link in links:
+                                            href = link.get('href', '')
+                                            link_text = link.get_text(strip=True).lower()
+                                            if not listing["apply_now_link"] and ('apply' in link_text or 'application' in href):
+                                                listing["apply_now_link"] = href
+                                            elif not listing["detail_page_link"] and ('/listings/detail/' in href or '/details/' in href):
+                                                listing["detail_page_link"] = href
+                                    
+                                    # Extract listing_id from detail_page_link (UUID)
+                                    # e.g. /listings/detail/000ba1f8-0db3-4648-8d7f-7991fcb73006 -> 000ba1f8-0db3-4648-8d7f-7991fcb73006
+                                    if listing["detail_page_link"]:
+                                        uuid_match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', listing["detail_page_link"], re.I)
+                                        if uuid_match:
+                                            listing["listing_id"] = uuid_match.group(1)
+                                        else:
+                                            # Fallback: use the last path segment
+                                            path_parts = listing["detail_page_link"].rstrip('/').split('/')
+                                            if path_parts:
+                                                listing["listing_id"] = path_parts[-1]
+                                    
+                                    # If still no listing_id, generate one from result_number and network
+                                    if not listing["listing_id"]:
+                                        import uuid
+                                        listing["listing_id"] = str(uuid.uuid4())
+                                    
+                                    # Extract unit_name from address before we have the full address
+                                    if listing["full_address"]:
+                                        # Extract unit number from address using regex patterns
+                                        unit_patterns = [
+                                            r'#\s*([A-Za-z0-9\-]+)',  # #503, #A, #B2
+                                            r'\b(?:apt|apartment|unit|suite|ste)\s*\.?\s*([A-Za-z0-9\-]+)',  # Apt 4B, Unit 123
+                                            r'\s-\s(\d+[A-Za-z]?),\s',  # " - 208, " (dash + unit before comma) - e.g. "617 - 3rd Ave W - 208, Seattle"
+                                            r'\s+([A-Za-z]?\d{2,4}[A-Za-z]?),\s',  # space + unit before comma
+                                        ]
+                                        for pattern in unit_patterns:
+                                            unit_match = re.search(pattern, listing["full_address"], re.I)
+                                            if unit_match:
+                                                listing["unit_name"] = unit_match.group(1).strip()
+                                                break
+                                        
+                                        # Generate google_address (cleaned address with unit stripped)
+                                        # This is used by Address Match to lookup/create google_addresses
+                                        strip_patterns = [
+                                            r'\b(apt|apartment|unit|suite|ste|bldg|building|floor|fl)\s*\.?\s*[a-z0-9\-]+',
+                                            r'\s*#\s*[a-z0-9\-]+',
+                                            r'\s-\s\d+[a-z]?,',  # " - 208," (dash + unit before comma) - e.g. "617 - 3rd Ave W - 208,"
+                                            r'\s+[a-z]\d+[a-z]?,\s',
+                                            r'\s+\d+[a-z]\d*,\s',
+                                        ]
+                                        cleaned_addr = listing["full_address"]
+                                        for pattern in strip_patterns:
+                                            cleaned_addr = re.sub(pattern, ',', cleaned_addr, flags=re.IGNORECASE)
+                                        cleaned_addr = re.sub(r',\s*,', ',', cleaned_addr)
+                                        cleaned_addr = re.sub(r'\s+', ' ', cleaned_addr)
+                                        listing["google_address"] = cleaned_addr.strip(', ')
+                                    
+                                    # Default bedrooms to "0" if not found (studio or unknown)
+                                    if not listing["bedrooms"]:
+                                        # Check for "studio" in text
+                                        if re.search(r'\bstudio\b', text, re.I):
+                                            listing["bedrooms"] = "0"
+                                        else:
+                                            listing["bedrooms"] = "0"  # Default to 0 instead of null
+                                    
+                                    # Default bathrooms to "1" if not found
+                                    if not listing["bathrooms"]:
+                                        listing["bathrooms"] = "1"
+                                    
+                                    # Only add if we have some useful data
+                                    if listing["full_address"] or listing["price"] or listing["title"]:
+                                        listings.append(listing)
+                                
+                                # Save to JSON
+                                with open(candidate_path, 'w', encoding='utf-8') as f:
+                                    json.dump(listings, f, indent=2)
+                                
+                                json_path = candidate_path
+                                listing_count = len(listings)
+                                status_win.after(0, lambda c=listing_count: log_activity(f"  ✓ Extracted {c} listings to JSON", "#00ff00"))
+                                
+                            except Exception as parse_err:
+                                error_msg = f"BeautifulSoup parsing failed: {parse_err}"
+                                status_win.after(0, lambda e=error_msg: log_activity(f"❌ {e}", "#ff0000"))
+                                log_to_file(f"[Queue] {error_msg}")
+                                status_win.after(0, lambda: status_labels[idx].config(text=f"{steps[idx]} - Failed ❌", fg="#ff0000"))
+                                status_win.after(0, lambda: finish_step_timer(idx))
+                                return
                             
                             # Check if we actually have listings
                             if not json_path or not os.path.exists(json_path):
@@ -2752,7 +3107,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 # Update queue_websites status to error
                                 try:
                                     import mysql.connector
-                                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                    conn = get_external_db()
                                     cursor = conn.cursor()
                                     cursor.execute("UPDATE queue_websites SET status = %s, last_error = %s WHERE id = %s", ("error", error_msg, job_id))
                                     conn.commit()
@@ -2776,7 +3131,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 # Update queue_websites status to error
                                 try:
                                     import mysql.connector
-                                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                    conn = get_external_db()
                                     cursor = conn.cursor()
                                     cursor.execute("UPDATE queue_websites SET status = %s, last_error = %s WHERE id = %s", ("error", error_msg, job_id))
                                     conn.commit()
@@ -2814,7 +3169,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 # Update queue_websites status to error
                                 try:
                                     import mysql.connector
-                                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                    conn = get_external_db()
                                     cursor = conn.cursor()
                                     cursor.execute("UPDATE queue_websites SET status = %s, last_error = %s WHERE id = %s", ("error", error_msg, job_id))
                                     conn.commit()
@@ -3445,7 +3800,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             # Update queue_websites status to error with message
                             try:
                                 import mysql.connector
-                                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                conn = get_external_db()
                                 cursor = conn.cursor()
                                 cursor.execute("UPDATE queue_websites SET status = %s, last_error = %s WHERE id = %s", ("error", error_msg, job_id))
                                 conn.commit()
@@ -3512,29 +3867,43 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                         stable_count = 0
                                         last_count = current_count
                             
-                            # If no images downloaded, skip Steps 3 and 4, go directly to Step 5
+                            # If no NEW images downloaded during this run, check if folder has existing images
                             if image_count == 0:
-                                status_win.after(0, lambda: log_activity("⚠️ No images to download, skipping to Step 5...", "#FFA500"))
-                                status_win.after(0, lambda: progress_frame.pack_forget())
-                                status_win.after(0, lambda: set_status_summary(idx, "⊘ Skipped (no images)", "#FFA500"))
-                                status_win.after(0, lambda: status_labels[idx].config(text=f"{steps[idx]} - Skipped ⊘", fg="#FFA500"))
+                                # Check total images in folder (existing + newly downloaded)
+                                total_in_folder = len([f for f in os.listdir(thumbnails_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp'))]) if os.path.exists(thumbnails_dir) else 0
                                 
-                                # Mark Step 3 as completed (skipped)
-                                status_win.after(0, lambda: finish_step(idx, auto_continue=False))
-                                
-                                # Skip Step 4 (Upload) as well since there are no images to upload
-                                step_4_idx = idx + 1
-                                if step_4_idx < len(steps):
-                                    status_win.after(0, lambda: log_activity("⚠️ Skipping Step 4 (Upload) - no images", "#FFA500"))
-                                    status_win.after(0, lambda: set_status_summary(step_4_idx, "⊘ Skipped (no images)", "#FFA500"))
-                                    status_win.after(0, lambda: status_labels[step_4_idx].config(text=f"{steps[step_4_idx]} - Skipped ⊘", fg="#FFA500"))
-                                    status_win.after(0, lambda: finish_step(step_4_idx, auto_continue=False))
-                                
-                                # Continue to Step 5 (Insert DB)
-                                step_5_idx = idx + 2
-                                if step_5_idx < len(steps):
-                                    status_win.after(100, lambda: run_steps(step_5_idx, True))
-                                return
+                                if total_in_folder > 0:
+                                    # There are existing images - Step 4 will upload any that aren't on server
+                                    status_win.after(0, lambda: log_activity(f"⚠️ No new downloads, but {total_in_folder} images exist in folder", "#FFA500"))
+                                    status_win.after(0, lambda: progress_frame.pack_forget())
+                                    status_win.after(0, lambda: set_status_summary(idx, f"⊘ No new downloads ({total_in_folder} existing)", "#FFA500"))
+                                    status_win.after(0, lambda: status_labels[idx].config(text=f"{steps[idx]} - No new ⊘", fg="#FFA500"))
+                                    # Continue to Step 4 to upload existing images
+                                    status_win.after(0, lambda: finish_step(idx, auto_continue))
+                                    return
+                                else:
+                                    # Truly no images anywhere - skip Step 4
+                                    status_win.after(0, lambda: log_activity("⚠️ No images in folder, skipping Step 4...", "#FFA500"))
+                                    status_win.after(0, lambda: progress_frame.pack_forget())
+                                    status_win.after(0, lambda: set_status_summary(idx, "⊘ No images", "#FFA500"))
+                                    status_win.after(0, lambda: status_labels[idx].config(text=f"{steps[idx]} - Skipped ⊘", fg="#FFA500"))
+                                    
+                                    # Mark Step 3 as completed (skipped)
+                                    status_win.after(0, lambda: finish_step(idx, auto_continue=False))
+                                    
+                                    # Skip Step 4 (Upload) as well since there are no images to upload
+                                    step_4_idx = idx + 1
+                                    if step_4_idx < len(steps):
+                                        status_win.after(0, lambda: log_activity("⚠️ Skipping Step 4 (Upload) - no images", "#FFA500"))
+                                        status_win.after(0, lambda: set_status_summary(step_4_idx, "⊘ Skipped (no images)", "#FFA500"))
+                                        status_win.after(0, lambda: status_labels[step_4_idx].config(text=f"{steps[step_4_idx]} - Skipped ⊘", fg="#FFA500"))
+                                        status_win.after(0, lambda: finish_step(step_4_idx, auto_continue=False))
+                                    
+                                    # Continue to Step 5 (Insert DB)
+                                    step_5_idx = idx + 2
+                                    if step_5_idx < len(steps):
+                                        status_win.after(100, lambda: run_steps(step_5_idx, True))
+                                    return
                             
                             _image_count = image_count
                             status_win.after(0, lambda: log_activity(f"✅ Downloaded {_image_count} images!", "#00ff00"))
@@ -3558,7 +3927,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             # Update queue_websites status to error with message
                             try:
                                 import mysql.connector
-                                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                conn = get_external_db()
                                 cursor = conn.cursor()
                                 cursor.execute("UPDATE queue_websites SET status = %s, last_error = %s WHERE id = %s", ("error", error_msg, job_id))
                                 conn.commit()
@@ -3573,6 +3942,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     
                     def execute_step_4(idx, auto_continue=True):
                         """Step 4: Upload with integrated progress"""
+                        import threading
                         try:
                             status_win.after(0, lambda: log_activity("Connecting to server...", "#aaa"))
                             status_win.after(0, lambda: progress_frame.pack(fill="x", padx=10, pady=5))
@@ -3680,7 +4050,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             # Update queue_websites status to error with message
                             try:
                                 import mysql.connector
-                                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                conn = get_external_db()
                                 cursor = conn.cursor()
                                 cursor.execute("UPDATE queue_websites SET status = %s, last_error = %s WHERE id = %s", ("error", error_msg, job_id))
                                 conn.commit()
@@ -3695,6 +4065,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     
                     def execute_step_5(idx, auto_continue=True):
                         """Step 5: Insert DB (embedded details tab)"""
+                        import threading
                         try:
                             status_win.after(0, lambda: log_activity("Inserting to DB...", "#aaa"))
                             # Load JSON listings - check both Networks and Websites folders
@@ -3744,10 +4115,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                     cursor = None
                                     for attempt in range(1, 4):
                                         try:
-                                            conn = _mysql.connect(
-                                                host='localhost', user='local_uzr', password='fuck',
-                                                database='offta', port=3306, connection_timeout=10, use_pure=True
-                                            )
+                                            conn = get_external_db()
                                             try:
                                                 conn.autocommit = True
                                             except Exception:
@@ -3762,6 +4130,27 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                     if cursor is None:
                                         status_win.after(0, lambda: log_activity("❌ Could not connect to DB.", "#ff0000"))
                                         return
+
+                                    # Backup apartment_listings for this network_id before making changes
+                                    try:
+                                        backup_table = f"apartment_listings_backup_{job_id}_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
+                                        # First check if source table has data for this network
+                                        cursor.execute("SELECT COUNT(*) FROM apartment_listings WHERE network_id = %s", (int(job_id),))
+                                        count_result = cursor.fetchone()
+                                        backup_count = count_result[0] if count_result else 0
+                                        
+                                        if backup_count > 0:
+                                            # Create backup table with same structure
+                                            cursor.execute(f"""
+                                                CREATE TABLE IF NOT EXISTS `{backup_table}` AS 
+                                                SELECT * FROM apartment_listings WHERE network_id = %s
+                                            """, (int(job_id),))
+                                            status_win.after(0, lambda bc=backup_count, bt=backup_table: log_activity(f"📦 Backed up {bc} rows to {bt}", "#aaa"))
+                                        else:
+                                            status_win.after(0, lambda: log_activity(f"📦 No existing listings for network_{job_id} to backup", "#aaa"))
+                                    except Exception as backup_err:
+                                        status_win.after(0, lambda e=str(backup_err): log_activity(f"⚠️ Backup warning: {e}", "#ffaa00"))
+                                        # Continue anyway - backup failure shouldn't stop the process
 
                                     # Helpers (lightweight copies)
                                     def to_int(val, default=0):
@@ -3828,26 +4217,27 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                         return
 
                                     def strip_unit(address):
-                                        """Remove unit numbers from address"""
+                                        """Remove unit numbers from address - matches PHP stripUnitFromAddress logic"""
                                         if not address:
                                             return address
                                         import re
-                                        # Remove patterns like: #34, Unit 123, Apt A, Suite X, space+digits at end, etc.
+                                        # Patterns from PHP stripUnitFromAddress function - fixed for Python
                                         patterns = [
-                                            r'\s+\d{1,4}(?:A|B|C|D)?,\s+',  # " 334, " or " 101, " before city
-                                            r'\s+-\s*\d+[A-Za-z]?,\s+',  # " - 00A, " before city
-                                            r'\s*#\d+.*$',  # #34 at end
-                                            r'\s*Unit\s+[A-Za-z0-9]+.*$',  # Unit 123
-                                            r'\s*Apt\.?\s+[A-Za-z0-9]+.*$',  # Apt A or Apt. A
-                                            r'\s*Suite\s+[A-Za-z0-9]+.*$',  # Suite X
-                                            r'\s*Ste\.?\s+[A-Za-z0-9]+.*$',  # Ste X
-                                            r',\s*Apt\.?\s+[A-Za-z0-9]+',  # , Apt 302
-                                            r'\s+[A-Za-z]?\d{2,4}[A-Za-z]?$',  # Space followed by 2-4 digits at very end (after comma removal)
+                                            r'\b(apt|apartment|unit|suite|ste|bldg|building|floor|fl)\s*\.?\s*[a-z0-9\-]+',  # apt 4B, unit 123, etc.
+                                            r'\s*#\s*[a-z0-9\-]+',  # #34, #503, #A anywhere
+                                            r'\s+[a-z]\d+[a-z]?,\s',  # Letter+digit combos like "b2," or "2a,"
+                                            r'\s+\d+[a-z]\d*,\s',  # Digit+letter combos
                                         ]
                                         cleaned = address
                                         for pattern in patterns:
-                                            cleaned = re.sub(pattern, ', ' if ', ' in pattern else '', cleaned, flags=re.IGNORECASE)
-                                        return cleaned.strip()
+                                            cleaned = re.sub(pattern, ' ', cleaned, flags=re.IGNORECASE)
+                                        
+                                        # Clean up multiple commas/spaces (from PHP)
+                                        cleaned = re.sub(r',\s*,', ',', cleaned)
+                                        cleaned = re.sub(r'\s+', ' ', cleaned)
+                                        cleaned = cleaned.strip(', ')
+                                        
+                                        return cleaned
                                     
                                     for listing in listings:
                                         full_address = strip_unit(listing.get("full_address") or listing.get("address") or "")
@@ -3944,14 +4334,16 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                         rows = cursor.fetchall() or []
                                         deactivated_here = 0
                                         for lid, url, fa in rows:
-                                            present = (url and url in current_urls) or (fa and fa in current_fa)
+                                            # Apply strip_unit to DB address for comparison (same as we do for JSON addresses)
+                                            fa_stripped = strip_unit(fa) if fa else None
+                                            present = (url and url in current_urls) or (fa_stripped and fa_stripped in current_fa)
                                             if not present:
                                                 cursor.execute("UPDATE apartment_listings SET active='no', time_updated=NOW() WHERE id=%s", (lid,))
                                                 inactive_c += 1
                                                 deactivated_here += 1
-                                        status_win.after(0, lambda: log_activity(f"🧹 Marked {deactivated_here} inactive for network_{job_id}", "#aaa"))
-                                    except Exception:
-                                        pass
+                                        status_win.after(0, lambda dh=deactivated_here: log_activity(f"🧹 Marked {dh} inactive for network_{job_id}", "#aaa"))
+                                    except Exception as deact_err:
+                                        status_win.after(0, lambda e=str(deact_err): log_activity(f"⚠️ Deactivation error: {e}", "#ffaa00"))
 
                                     # Final statistics summary
                                     _new_c = new_c
@@ -3969,30 +4361,57 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                     except Exception:
                                         pass
                                     
-                                    # Insert stats into network_daily_stats (BEFORE closing connection)
+                                    # Insert stats directly into network_daily_stats table
                                     try:
-                                        log_to_file(f"[Insert DB] Inserting stats for job {job_id}: price_changes={_price_c}, added={_new_c}, subtracted={_inactive_c}, total={_total}")
-                                        cursor.execute(
-                                            "INSERT INTO network_daily_stats (network_id, date, price_changes, apartments_added, apartments_subtracted, total_listings) "
-                                            "VALUES (%s, CURDATE(), %s, %s, %s, %s) "
-                                            "ON DUPLICATE KEY UPDATE price_changes=%s, apartments_added=%s, apartments_subtracted=%s, total_listings=%s",
-                                            (int(job_id), _price_c, _new_c, _inactive_c, _total, _price_c, _new_c, _inactive_c, _total)
-                                        )
+                                        from datetime import date
+                                        today_str = date.today().strftime("%Y-%m-%d")
+                                        log_to_file(f"[Insert DB] Inserting stats for network {job_id}: date={today_str}, price_changes={_price_c}, added={_new_c}, subtracted={_inactive_c}, total={_total}")
+                                        
+                                        cursor.execute("""
+                                            INSERT INTO network_daily_stats 
+                                            (network_id, date, price_changes, apartments_added, apartments_subtracted, total_listings)
+                                            VALUES (%s, %s, %s, %s, %s, %s)
+                                            ON DUPLICATE KEY UPDATE
+                                                price_changes = VALUES(price_changes),
+                                                apartments_added = VALUES(apartments_added),
+                                                apartments_subtracted = VALUES(apartments_subtracted),
+                                                total_listings = VALUES(total_listings)
+                                        """, (int(job_id), today_str, int(_price_c or 0), int(_new_c or 0), int(_inactive_c or 0), int(_total or 0)))
                                         conn.commit()
-                                        log_to_file(f"[Insert DB] ✅ Stats successfully inserted for job {job_id}")
-                                        _stats_msg = "✅ Stats saved to network_daily_stats"
+                                        log_to_file(f"[Insert DB] ✅ Stats successfully saved to network_daily_stats for network {job_id}")
+                                        _stats_msg = "✅ Stats saved to DB"
                                         status_win.after(0, lambda msg=_stats_msg: log_activity(msg, "#2ECC71"))
                                     except Exception as stats_err:
                                         _err_msg = str(stats_err)
-                                        log_to_file(f"[Insert DB] ❌ Stats insert failed for job {job_id}: {_err_msg}")
+                                        log_to_file(f"[Insert DB] ❌ Stats insert failed for network {job_id}: {_err_msg}")
                                         status_win.after(0, lambda msg=_err_msg: log_activity(f"⚠️ Stats insert failed: {msg}", "#ffaa00"))
                                     
-                                    # Close connection AFTER stats insert
+                                    # Close connection
                                     try:
                                         cursor.close()
                                         conn.close()
                                     except Exception:
                                         pass
+                                    
+                                    # Mark queue_websites status as 'done' since Step 5 is now the final step
+                                    try:
+                                        from datetime import datetime as _dt2
+                                        now_str = _dt2.now().strftime('%Y-%m-%d %H:%M:%S')
+                                        conn2 = get_external_db()
+                                        cursor2 = conn2.cursor()
+                                        cursor2.execute("""
+                                            UPDATE queue_websites 
+                                            SET status = 'done', processed_at = %s, updated_at = %s
+                                            WHERE id = %s
+                                        """, (now_str, now_str, job_id))
+                                        conn2.commit()
+                                        cursor2.close()
+                                        conn2.close()
+                                        log_to_file(f"[Insert DB] ✅ Updated queue_websites status to 'done' for job {job_id}")
+                                        status_win.after(0, lambda: log_activity("✅ Status marked as done", "#2ECC71"))
+                                    except Exception as status_err:
+                                        log_to_file(f"[Insert DB] ⚠️ Failed to update queue_websites status: {status_err}")
+                                    
                                     status_win.after(0, lambda: finish_step(idx, auto_continue))
 
                                 except Exception as e:
@@ -4005,7 +4424,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                     # Update queue_websites status to error with message
                                     try:
                                         import mysql.connector
-                                        conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                        conn = get_external_db()
                                         cursor = conn.cursor()
                                         cursor.execute("UPDATE queue_websites SET status = %s, last_error = %s WHERE id = %s", ("error", error_msg, job_id))
                                         conn.commit()
@@ -4028,95 +4447,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             # Update queue_websites status to error with message
                             try:
                                 import mysql.connector
-                                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
-                                cursor = conn.cursor()
-                                cursor.execute("UPDATE queue_websites SET status = %s, last_error = %s WHERE id = %s", ("error", error_msg, job_id))
-                                conn.commit()
-                                cursor.close()
-                                conn.close()
-                            except Exception as db_err:
-                                log_to_file(f"[Queue] Failed to update queue_websites status: {db_err}")
-                            status_win.after(0, lambda: status_labels[idx].config(text=f"{steps[idx]} - Failed ❌", fg="#ff0000"))
-                            # DO NOT continue to next step - stop here
-                            return
-                    
-                    def execute_step_6(idx, auto_continue=True):
-                        """Step 6: Address Match with API call count and final status update"""
-                        try:
-                            status_win.after(0, lambda: log_activity("Matching addresses...", "#aaa"))
-                            status_win.after(0, lambda: progress_frame.pack(fill="x", padx=10, pady=5))
-
-                            # Register a callback so the Address Match window can notify completion
-                            def _on_address_match_done(new_calls: int):
-                                try:
-                                    status_win.after(0, lambda: log_activity(f"📞 API calls: {new_calls}", "#3498DB"))
-                                    status_win.after(0, lambda: log_activity("✅ Address matching complete!", "#00ff00"))
-                                    status_win.after(0, lambda: set_status_summary(idx, f"🗺️ API calls: {new_calls} • Status: done", "#2ECC71"))
-                                    # Update stats and table Summary (Networks)
-                                    try:
-                                        job_stats['api_calls'] = int(new_calls or 0)
-                                        _update_summary_on_table()
-                                    except Exception:
-                                        pass
-                                    
-                                    # Update queue_websites: status=done, processed_at=NOW, updated_at=NOW
-                                    try:
-                                        import mysql.connector
-                                        from datetime import datetime
-                                        conn = mysql.connector.connect(host='localhost', port=3306, user='local_uzr', password='fuck', database='offta', connect_timeout=10)
-                                        cursor = conn.cursor()
-                                        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                        cursor.execute("""
-                                            UPDATE queue_websites 
-                                            SET status = 'done', processed_at = %s, updated_at = %s
-                                            WHERE id = %s
-                                        """, (now_str, now_str, job_id))
-                                        conn.commit()
-                                        cursor.close()
-                                        conn.close()
-                                        log_to_file(f"[Address Match] Updated queue_websites status to 'done' with timestamps")
-                                    except Exception as db_err:
-                                        log_to_file(f"[Address Match] Failed to update queue_websites: {db_err}")
-                                finally:
-                                    status_win.after(0, lambda: progress_frame.pack_forget())
-                                    status_win.after(0, lambda: finish_step(idx, auto_continue))
-
-                            try:
-                                ADDRESS_MATCH_CALLBACKS[str(job_id)] = _on_address_match_done
-                            except Exception:
-                                pass
-
-                            # Add clickable link to reopen Address Match window
-                            def open_address_window(path=None):
-                                try:
-                                    from config_helpers import show_address_match_window
-                                    show_address_match_window(job_id, status_win, manual_open=True)
-                                except Exception as e:
-                                    log_to_file(f"Failed to open address match window: {e}")
-                            
-                            status_win.after(0, lambda: set_status_path(idx, "Address Match", open_address_window))
-                            status_win.after(0, lambda: log_activity("🗺️ Address Match", "#3498DB"))
-                            
-                            # Launch the Address Match UI directly (bypass API)
-                            try:
-                                from config_helpers import show_address_match_window
-                                status_win.after(0, lambda: show_address_match_window(job_id, status_win, manual_open=False))
-                                status_win.after(0, lambda: log_activity("✅ Address Match window opened", "#00ff00"))
-                            except Exception as open_err:
-                                status_win.after(0, lambda err=str(open_err): log_activity(f"❌ Failed to open window: {err}", "#ff0000"))
-                                raise
-                            # Do not finish here; wait for callback from the Address Match window
-                        except Exception as e:
-                            error_msg = str(e)
-                            status_win.after(0, lambda: log_activity(f"❌ Step 6 failed: {error_msg}", "#ff0000"))
-                            # Update network status to error
-                            network_id = get_network_id()
-                            if network_id:
-                                update_db_status(network_id, "error", error_msg)
-                            # Update queue_websites status to error with message
-                            try:
-                                import mysql.connector
-                                conn = mysql.connector.connect(host='localhost', port=3306, user='local_uzr', password='fuck', database='offta', connect_timeout=10)
+                                conn = get_external_db()
                                 cursor = conn.cursor()
                                 cursor.execute("UPDATE queue_websites SET status = %s, last_error = %s WHERE id = %s", ("error", error_msg, job_id))
                                 conn.commit()
@@ -4163,7 +4494,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             # Open Websites Activity Window
                             try:
                                 import mysql.connector
-                                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                conn = get_external_db()
                                 cursor = conn.cursor()
                                 cursor.execute("SELECT availability_website, Website, Name FROM google_places WHERE id = %s", (job_id,))
                                 result = cursor.fetchone()
@@ -4674,7 +5005,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                         activity_win.update()
                                         
                                         import mysql.connector
-                                        db_conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                        db_conn = get_external_db()
                                         db_cursor = db_conn.cursor()
                                         
                                         # Get google_addresses_id from google_places
@@ -5320,14 +5651,13 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         # Immediately show a spinner in the clicked step column for feedback
                         try:
                             vals_list = list(values)
-                            # Map step to column index in values tuple (11 columns total now)
+                            # Map step to column index in values tuple (10 columns total now)
                             step_col_index = {
                                 'capture_html': 5,   # 1.HTML column
                                 'create_json': 6,    # 2.JSON column
                                 'manual_match': 7,   # 3.Extract column (download/extract images)
                                 'process_db': 8,     # 4.Upload column (upload images to server)
-                                'insert_db': 9,       # 5.Insert DB column
-                                'address_match': 10   # 6.Address Match column
+                                'insert_db': 9       # 5.Insert DB column
                             }.get(step)
                             if step_col_index is not None and step_col_index < len(vals_list):
                                 vals_list[step_col_index] = '⏳'
@@ -5406,10 +5736,10 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             except:
                                 job_id = job_id_str
                             
-                            # Fetch error message from database
+                            # Fetch error message from REMOTE database
                             try:
                                 import mysql.connector
-                                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                                conn = get_external_db()
                                 cursor = conn.cursor()
                                 cursor.execute("SELECT last_error FROM queue_websites WHERE id = %s", (job_id,))
                                 result = cursor.fetchone()
@@ -5542,7 +5872,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 from datetime import datetime
                 
                 # Query all apartment_listings for this building
-                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                conn = get_external_db()
                 cursor = conn.cursor(dictionary=True)
                 
                 # Get building name and last scraped time
@@ -6349,7 +6679,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     if str(current_table).lower() == 'parcel':
                         try:
                             import mysql.connector
-                            conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta')
+                            conn = get_external_db()
                             cursor = conn.cursor(dictionary=True)
                             metro = selected_metro if selected_metro and selected_metro != 'All' else 'Seattle'
                             cursor.execute("SELECT parcel_link FROM major_metros WHERE metro_name = %s", (metro,))
@@ -6557,6 +6887,13 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         self._parcel_activity_window.destroy()
                     except:
                         pass
+                # Restore Queue Poller window
+                try:
+                    root.deiconify()  # Show again
+                    root.lift()
+                    root.focus_force()
+                except:
+                    pass
                 return
             
             log_to_file("[Auto Capture] Starting automated capture workflow")
@@ -6566,7 +6903,38 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             
             # Create Parcel Activity Window
             activity_win = tk.Toplevel(root)
-            activity_win.title("Parcel Activity")
+            activity_win.title("Parcel Auto Capture")
+            
+            # PREVENT CLOSE/MINIMIZE - keep window always visible while running
+            def on_close_attempt():
+                """Prevent closing - user must use Stop button"""
+                pass  # Do nothing - ignore close request
+            
+            activity_win.protocol("WM_DELETE_WINDOW", on_close_attempt)
+            
+            # Remove minimize/maximize buttons, keep only title bar
+            activity_win.resizable(False, False)
+            
+            # Keep window always on top while auto capture is running
+            activity_win.attributes('-topmost', True)
+            
+            # Helper to restore Queue Poller window
+            def _restore_queue_poller():
+                try:
+                    root.deiconify()  # Show again
+                    root.lift()
+                    root.focus_force()
+                except Exception:
+                    pass
+            self._restore_queue_poller = _restore_queue_poller
+            
+            # Hide Queue Poller window while Parcel Activity is running
+            try:
+                root.withdraw()  # Hide completely
+                activity_win.lift()
+                activity_win.focus_force()
+            except Exception:
+                pass
             
             # Position at left 20% of screen
             screen_w = activity_win.winfo_screenwidth()
@@ -6624,6 +6992,108 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 parcels_path = r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels"
                 subprocess.Popen(f'explorer "{parcels_path}"')
             
+            def show_json_and_insert():
+                """Show JSON files and option to manually insert into database"""
+                import subprocess
+                from pathlib import Path
+                import json as json_module
+                
+                parcels_path = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels")
+                json_files = sorted(parcels_path.glob("openai_batch_*.json"), reverse=True)
+                
+                if not json_files:
+                    messagebox.showinfo("JSON Files", "No OpenAI batch JSON files found.\n\nJSON files are created after processing parcel images with OpenAI.")
+                    return
+                
+                # Create popup window
+                json_win = tk.Toplevel(activity_win)
+                json_win.title("📄 OpenAI JSON Results")
+                json_win.geometry("500x400")
+                json_win.configure(bg="#2C3E50")
+                
+                # Title
+                title = tk.Label(json_win, text="OpenAI Batch JSON Files", font=("Segoe UI", 12, "bold"), bg="#2C3E50", fg="white")
+                title.pack(pady=10)
+                
+                # Listbox for JSON files
+                listbox_frame = tk.Frame(json_win, bg="#2C3E50")
+                listbox_frame.pack(fill="both", expand=True, padx=10, pady=5)
+                
+                listbox = tk.Listbox(listbox_frame, font=("Consolas", 10), bg="#34495E", fg="white", selectbackground="#3498DB")
+                listbox.pack(side="left", fill="both", expand=True)
+                
+                scrollbar = tk.Scrollbar(listbox_frame)
+                scrollbar.pack(side="right", fill="y")
+                listbox.config(yscrollcommand=scrollbar.set)
+                scrollbar.config(command=listbox.yview)
+                
+                for jf in json_files:
+                    try:
+                        size = jf.stat().st_size
+                        with open(jf, 'r') as f:
+                            data = json_module.load(f)
+                            count = len(data) if isinstance(data, list) else 1
+                        listbox.insert("end", f"{jf.name} ({count} records, {size/1024:.1f}KB)")
+                    except:
+                        listbox.insert("end", f"{jf.name} (error reading)")
+                
+                # Buttons frame
+                btn_frame = tk.Frame(json_win, bg="#2C3E50")
+                btn_frame.pack(fill="x", padx=10, pady=10)
+                
+                def open_selected_json():
+                    sel = listbox.curselection()
+                    if sel:
+                        idx = sel[0]
+                        jf = json_files[idx]
+                        subprocess.Popen(['notepad.exe', str(jf)])
+                
+                def insert_selected_json():
+                    sel = listbox.curselection()
+                    if not sel:
+                        messagebox.showwarning("Select File", "Please select a JSON file first")
+                        return
+                    
+                    idx = sel[0]
+                    jf = json_files[idx]
+                    
+                    if not messagebox.askyesno("Insert to Database", f"Insert data from {jf.name} into king_county_parcels table?\n\nThis will connect to the external database at 172.104.206.182"):
+                        return
+                    
+                    try:
+                        log_activity(f"📥 Loading {jf.name}...")
+                        with open(jf, 'r') as f:
+                            data = json_module.load(f)
+                        
+                        if not isinstance(data, list):
+                            data = [data]
+                        
+                        log_activity(f"📊 Found {len(data)} records to insert")
+                        
+                        # Import and run the insert function
+                        from process_with_openai import insert_to_database
+                        inserted = insert_to_database(data)
+                        
+                        if inserted > 0:
+                            log_activity(f"✅ Inserted {inserted} records into king_county_parcels")
+                            messagebox.showinfo("Success", f"Inserted {inserted} records into king_county_parcels table")
+                        else:
+                            log_activity(f"⚠️ No records inserted (may already exist)")
+                            messagebox.showwarning("No Inserts", "No records were inserted.\nThey may already exist in the database.")
+                        
+                    except Exception as e:
+                        log_activity(f"❌ Insert error: {e}")
+                        messagebox.showerror("Error", f"Failed to insert: {e}")
+                
+                open_btn = tk.Button(btn_frame, text="📄 Open in Notepad", font=("Segoe UI", 10), bg="#3498DB", fg="white", command=open_selected_json)
+                open_btn.pack(side="left", padx=5)
+                
+                insert_btn = tk.Button(btn_frame, text="💾 Insert to Database", font=("Segoe UI", 10, "bold"), bg="#27AE60", fg="white", command=insert_selected_json)
+                insert_btn.pack(side="left", padx=5)
+                
+                close_btn = tk.Button(btn_frame, text="❌ Close", font=("Segoe UI", 10), bg="#E74C3C", fg="white", command=json_win.destroy)
+                close_btn.pack(side="right", padx=5)
+            
             pause_btn = tk.Button(
                 controls_frame,
                 text="⏸️ Pause",
@@ -6634,11 +7104,23 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 cursor="hand2",
                 command=toggle_pause
             )
-            pause_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+            pause_btn.pack(side="left", fill="x", expand=True, padx=(0, 2))
+            
+            json_btn = tk.Button(
+                controls_frame,
+                text="📄 JSON",
+                font=("Segoe UI", 10, "bold"),
+                bg="#9B59B6",
+                fg="white",
+                relief="flat",
+                cursor="hand2",
+                command=show_json_and_insert
+            )
+            json_btn.pack(side="left", fill="x", expand=True, padx=2)
             
             folder_btn = tk.Button(
                 controls_frame,
-                text="📁 Open Folder",
+                text="📁 Folder",
                 font=("Segoe UI", 10, "bold"),
                 bg="#3498DB",
                 fg="white",
@@ -6646,7 +7128,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 cursor="hand2",
                 command=open_parcels_folder
             )
-            folder_btn.pack(side="right", fill="x", expand=True, padx=(5, 0))
+            folder_btn.pack(side="right", fill="x", expand=True, padx=(2, 0))
             
             # Progress bar frame
             progress_frame = tk.Frame(activity_win, bg="#2C3E50")
@@ -6890,12 +7372,23 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                         continue  # Retry on non-fatal errors
                                 
                                 # Show detailed output in activity window
+                                db_error_detected = False
+                                inserted_count = 0
                                 if result.stdout:
                                     log_to_file(f"[Auto Capture] Output: {result.stdout}")
                                     # Parse and display key information
                                     success_lines = result.stdout.split('\n')
                                     for line in success_lines:
                                         if line.strip():
+                                            # Check for database errors
+                                            if 'Database error' in line or 'Unknown database' in line or 'Linking error' in line:
+                                                db_error_detected = True
+                                            # Extract inserted count
+                                            if 'Total inserted to database:' in line:
+                                                try:
+                                                    inserted_count = int(line.split(':')[-1].strip())
+                                                except:
+                                                    pass
                                             def log_success(msg=line):
                                                 self._parcel_activity_log(msg)
                                             self._root.after(0, log_success)
@@ -6909,8 +7402,13 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                                 self._parcel_activity_log(f"⚠️ {msg}")
                                             self._root.after(0, log_warn)
                                 
-                                self._root.after(0, lambda: self._parcel_activity_log("✅ Batch processed successfully!"))
-                                self._root.after(0, lambda: self._safe_stats_update('status', text="✅ Batch complete, continuing..."))
+                                # Report based on actual success, not just return code
+                                if db_error_detected or inserted_count == 0:
+                                    self._root.after(0, lambda: self._parcel_activity_log("⚠️ Batch completed but DATABASE INSERT FAILED!"))
+                                    self._root.after(0, lambda: self._safe_stats_update('status', text="⚠️ DB error - check connection"))
+                                else:
+                                    self._root.after(0, lambda c=inserted_count: self._parcel_activity_log(f"✅ Batch processed successfully! ({c} inserted)"))
+                                    self._root.after(0, lambda: self._safe_stats_update('status', text="✅ Batch complete, continuing..."))
                                 
                                 # Refresh the table
                                 self._root.after(0, lambda: self._trigger_parcel_refresh() if hasattr(self, '_trigger_parcel_refresh') else None)
@@ -6930,9 +7428,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         
                         # Get next address without parcel data that doesn't have an image yet
                         try:
-                            conn = mysql.connector.connect(
-                                host='localhost', port=3306, user='root', password='', database='offta'
-                            )
+                            conn = get_external_db()
                             cursor = conn.cursor(dictionary=True)
                             
                             # Get metro
@@ -6940,7 +7436,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             if not metro or metro == 'All':
                                 metro = 'Seattle'
                             
-                            # Find addresses without parcels and without images
+                            # Find addresses without parcels - get more to ensure we find uncaptured ones
                             cursor.execute("""
                                 SELECT ga.id, mm.parcel_link
                                 FROM google_addresses ga
@@ -6950,7 +7446,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 AND JSON_EXTRACT(ga.json_dump, '$.result') IS NOT NULL
                                 AND mm.metro_name = %s
                                 ORDER BY ga.id ASC
-                                LIMIT 100
+                                LIMIT 1000
                             """, (metro,))
                             
                             candidates = cursor.fetchall()
@@ -7007,9 +7503,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             # Get address from json_dump and check if we should skip
                             should_skip = False
                             try:
-                                conn_addr = mysql.connector.connect(
-                                    host='localhost', port=3306, user='root', password='', database='offta'
-                                )
+                                conn_addr = get_external_db()
                                 cursor_addr = conn_addr.cursor(dictionary=True)
                                 cursor_addr.execute("SELECT json_dump FROM google_addresses WHERE id = %s", (next_address['id'],))
                                 addr_row = cursor_addr.fetchone()
@@ -7321,6 +7815,8 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 finally:
                     self._auto_capture_running = False
                     self._root.after(0, lambda: self._auto_capture_btn.config(text="🤖 Auto Capture", bg="#27AE60"))
+                    # Restore Queue Poller window when auto capture ends
+                    self._root.after(100, lambda: self._restore_queue_poller())
             
             # Start in background thread
             import threading
@@ -7337,16 +7833,25 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             caller_info = f"{caller_frame.f_code.co_filename}:{caller_frame.f_lineno} in {caller_frame.f_code.co_name}"
             log_to_file(f"[Queue] _refresh_queue_table() called, silent={silent}, caller={caller_info}")
             
-            # Prevent multiple simultaneous refreshes (check BEFORE tree recreation)
+            # Get current table FIRST - we need to allow tab switches even if refresh in progress
+            current_table = self._current_table.get()
+            
+            # Track which table is being refreshed - allow switching to different tabs
             if hasattr(self, '_refresh_in_progress') and self._refresh_in_progress:
-                log_to_file("[Queue] Refresh already in progress, skipping...")
-                return
-            log_to_file(f"[Queue] Setting _refresh_in_progress=True")
+                # If switching to a DIFFERENT table, cancel previous refresh and allow this one
+                if hasattr(self, '_refreshing_table') and self._refreshing_table == current_table:
+                    log_to_file(f"[Queue] Refresh already in progress for same table ({current_table}), skipping...")
+                    return
+                else:
+                    # Allow tab switch - mark old refresh as cancelled
+                    log_to_file(f"[Queue] Switching from {getattr(self, '_refreshing_table', 'unknown')} to {current_table}, allowing...")
+            
+            log_to_file(f"[Queue] Setting _refresh_in_progress=True for table: {current_table}")
             self._refresh_in_progress = True
+            self._refreshing_table = current_table  # Track which table is being refreshed
             
             # Recreate tree if switching to/from Parcel tab (different column structure)
             try:
-                current_table = self._current_table.get()
                 is_parcel = current_table.lower() == 'parcel'
                 log_to_file(f"[Queue] Checking tree structure for table: {current_table}")
                 
@@ -7355,8 +7860,9 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     current_cols = self._queue_tree['columns']
                     needs_recreation = False
                     
-                    if is_parcel and len(current_cols) != 5:
-                        log_to_file(f"[Queue] Parcel tab needs 5 columns, currently has {len(current_cols)}")
+                    # Parcel tree has 6 columns: ID, Address, Network, Metro, Image, Edit
+                    if is_parcel and len(current_cols) != 6:
+                        log_to_file(f"[Queue] Parcel tab needs 6 columns, currently has {len(current_cols)}")
                         needs_recreation = True
                     elif not is_parcel and len(current_cols) != 16:
                         log_to_file(f"[Queue] Standard tab needs 16 columns, currently has {len(current_cols)}")
@@ -7436,15 +7942,32 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             except Exception:
                 pass
             
+            # Determine tab name for display
+            tab_display_name = "Data"
+            if str(current_table).lower() == 'parcel':
+                tab_display_name = "Parcel"
+            elif str(current_table).lower() == 'queue_websites':
+                tab_display_name = "Networks"
+            elif str(current_table).lower() in ('listing_websites', 'websites'):
+                tab_display_name = "Websites"
+            elif str(current_table).lower() == 'accounts':
+                tab_display_name = "Accounts"
+            elif str(current_table).lower() == 'code':
+                tab_display_name = "Code"
+            elif str(current_table).lower() == '911':
+                tab_display_name = "911"
+            
+            log_to_file(f"[Queue] Loading tab: {tab_display_name} (current_table={current_table})")
+            
             # Show loading indicator
             if not silent and hasattr(self, '_show_loading'):
                 self._root.after(0, self._show_loading)
             # Update status immediately on main thread (only for manual refresh)
             if not silent and hasattr(self, '_root'):
-                self._root.after(0, lambda: self._queue_status_label.config(text="Loading..."))
+                self._root.after(0, lambda tn=tab_display_name: self._queue_status_label.config(text=f"Loading {tn}..."))
             
             if not silent:
-                log_to_file("[Queue] Background fetch started")
+                log_to_file(f"[Queue] Background fetch started for {tab_display_name}")
             
             # Initialize rows before loading (needed for tree population later)
             rows = []
@@ -7457,14 +7980,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     if not silent:
                         log_to_file(f"[Parcel] Loading from king_county_parcels...")
                     
-                    conn = mysql.connector.connect(
-                        host='localhost',
-                        port=3306,
-                        user='root',
-                        password='',
-                        database='offta',
-                        connect_timeout=10
-                    )
+                    conn = get_external_db()
                     cursor = conn.cursor(dictionary=True)
                     
                     # Get metro name and parcel_link based on selected metro
@@ -7502,26 +8018,30 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         self._root.after(0, lambda: self._queue_status_label.config(text=stats_text))
                     
                     # Query google_addresses WITHOUT king_county_parcels_id (addresses that need processing)
-                    # Parse address from json_dump column - structure: {"result": {"formatted_address": "..."}}
+                    # Parse address from json_dump column - supports both structures:
+                    # {"result": {"formatted_address": "..."}} and {"results": [{"formatted_address": "..."}]}
                     query = f"""
                         SELECT 
                             ga.id,
                             COALESCE(
                                 JSON_UNQUOTE(JSON_EXTRACT(ga.json_dump, '$.result.formatted_address')),
-                                JSON_UNQUOTE(JSON_EXTRACT(ga.json_dump, '$.result.name')),
-                                JSON_UNQUOTE(JSON_EXTRACT(ga.json_dump, '$.result.vicinity')),
-                                'No address available'
+                                JSON_UNQUOTE(JSON_EXTRACT(ga.json_dump, '$.results[0].formatted_address'))
                             ) as address,
+                            al.network_id,
                             mm.metro_name,
                             mm.parcel_link,
                             ga.json_dump
                         FROM google_addresses ga
                         INNER JOIN major_metros mm ON mm.id = ga.metro_id
+                        LEFT JOIN apartment_listings al ON al.google_addresses_id = ga.id
                         WHERE ga.king_county_parcels_id IS NULL
                         AND ga.json_dump IS NOT NULL 
                         AND ga.json_dump != ''
                         AND ga.json_dump != '{{}}'
-                        AND JSON_EXTRACT(ga.json_dump, '$.result') IS NOT NULL
+                        AND (
+                            JSON_EXTRACT(ga.json_dump, '$.result.formatted_address') IS NOT NULL
+                            OR JSON_EXTRACT(ga.json_dump, '$.results[0].formatted_address') IS NOT NULL
+                        )
                         AND mm.metro_name = %s
                         ORDER BY ga.id DESC
                     """
@@ -7532,25 +8052,42 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     conn.close()
                     
                     def strip_unit_display(address):
-                        """Remove unit numbers from address for display"""
+                        """Remove unit numbers and building names from address for display, keeping city/state"""
                         if not address:
                             return address
                         import re
-                        # Remove patterns like: #34, Unit 123, Apt A, Suite X, etc.
+                        
+                        # If address starts with a letter (not a digit), it's likely a building name
+                        # Split on comma and use the part after the first comma as the address
+                        # Example: "The Maverick, 123 Main St, Seattle, WA" -> "123 Main St, Seattle, WA"
+                        if address and address[0].isalpha():
+                            parts = address.split(',', 1)
+                            if len(parts) > 1:
+                                # Check if the second part looks like a street address (starts with number)
+                                second_part = parts[1].strip()
+                                if second_part and second_part[0].isdigit():
+                                    address = second_part
+                        
+                        # Remove only the unit portion, not what follows (city/state)
+                        # Match unit patterns followed by comma or end of string
                         patterns = [
-                            r'\s*#\d+.*$',  # #34 at end
-                            r'\s*Unit\s+[A-Za-z0-9]+.*$',  # Unit 123
-                            r'\s*Apt\.?\s+[A-Za-z0-9]+.*$',  # Apt A or Apt. A
-                            r'\s*Suite\s+[A-Za-z0-9]+.*$',  # Suite X
-                            r'\s*Ste\.?\s+[A-Za-z0-9]+.*$',  # Ste X
+                            r'\s*#\d+[A-Za-z]?\s*(?=,|$)',  # #34 or #34A before comma or end
+                            r'\s*Unit\s+[A-Za-z0-9]+\s*(?=,|$)',  # Unit 123 before comma or end
+                            r'\s*Apt\.?\s+[A-Za-z0-9]+\s*(?=,|$)',  # Apt A or Apt. A before comma or end
+                            r'\s*Suite\s+[A-Za-z0-9]+\s*(?=,|$)',  # Suite X before comma or end
+                            r'\s*Ste\.?\s+[A-Za-z0-9]+\s*(?=,|$)',  # Ste X before comma or end
                         ]
                         cleaned = address
                         for pattern in patterns:
                             cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+                        # Clean up any double commas or leading commas that might result
+                        cleaned = re.sub(r',\s*,', ',', cleaned)
+                        cleaned = re.sub(r'^\s*,\s*', '', cleaned)
                         return cleaned.strip()
                     
                     rows = []
                     parcel_link_found = None
+                    seen_addresses = set()  # Track unique addresses to avoid duplicates
                     for parcel in parcels:
                         plink = parcel.get('parcel_link') or ''
                         if plink and not parcel_link_found:
@@ -7561,10 +8098,18 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         address = strip_unit_display(parcel.get('address') or '')
                         if not address:
                             log_to_file(f"[Parcel] Row {parcel.get('id')}: No address found in query result")
+                            continue
+                        
+                        # Skip duplicate addresses (after unit stripping)
+                        address_key = address.lower().strip()
+                        if address_key in seen_addresses:
+                            continue
+                        seen_addresses.add(address_key)
                         
                         rows.append({
                             'id': parcel.get('id'),
                             'address': address,
+                            'network_id': parcel.get('network_id'),
                             'metro_name': parcel.get('metro_name') or '',
                             'parcel_link': plink,
                             'json_dump': parcel.get('json_dump') or '{}',  # Include json_dump from query
@@ -7595,7 +8140,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 status_filter = current_status if current_status and current_status.lower() != 'all' else None
                 
                 def _bg_load():
-                    import mysql.connector
+                    import requests
                     from datetime import date
                     
                     # Configure Networks columns FIRST (on main thread)
@@ -7608,24 +8153,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     self._root.after(0, _configure_columns)
                     
                     try:
-                        log_to_file(f"[Networks] BG: Loading from queue_websites table with stats (filter={status_filter})")
-                        
-                        DB_CONFIG = {
-                            'host': 'localhost',
-                            'port': 3306,
-                            'user': 'root',
-                            'password': '',
-                            'database': 'offta'
-                        }
-                        
-                        conn = mysql.connector.connect(**DB_CONFIG, connect_timeout=3)
-                        cursor = conn.cursor(dictionary=True)
-                        
-                        # Get selected date from dropdown (default to today)
-                        try:
-                            selected_date = self._selected_date.get()
-                        except:
-                            selected_date = date.today().strftime("%Y-%m-%d")
+                        log_to_file(f"[Networks] BG: Loading from API (filter={status_filter})")
                         
                         # Get selected metro for filtering
                         try:
@@ -7635,72 +8163,102 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         if not selected_metro:
                             selected_metro = "Seattle"
                         
-                        # Join queue_websites with network_daily_stats to get SELECTED DATE's stats
-                        # Join with major_metros to get metro_name and filter by selected metro
-                        query = """
-                            SELECT 
-                                qw.*,
-                                n.major_metro_id,
-                                mm.metro_name,
-                                nds.price_changes,
-                                nds.apartments_added,
-                                nds.apartments_subtracted,
-                                nds.total_listings
-                            FROM queue_websites qw
-                            LEFT JOIN networks n ON qw.source_table = 'networks' AND qw.source_id = n.id
-                            LEFT JOIN major_metros mm ON n.major_metro_id = mm.id
-                            LEFT JOIN network_daily_stats nds ON qw.id = nds.network_id 
-                                AND nds.date = %s
-                            WHERE qw.source_table != 'king_county_parcels'
-                            AND mm.metro_name = %s
-                        """
-                        params = [selected_date, selected_metro]
-                        
-                        # Add status filter if specified
+                        # Fetch from API instead of local database
+                        api_url = "https://api.trustyhousing.com/user/admin/get-queue-websites.php"
+                        params = {'limit': 100}
                         if status_filter:
-                            query += " AND qw.status = %s"
-                            params.append(status_filter)
+                            params['status'] = status_filter
+                        if selected_metro:
+                            params['metro'] = selected_metro
                         
-                        query += " ORDER BY qw.processed_at DESC LIMIT 100"
-                        
-                        cursor.execute(query, params)
-                        db_rows = cursor.fetchall()
-                        cursor.close()
-                        conn.close()
+                        log_to_file(f"[Networks] BG: Calling API: {api_url} with params: {params}")
+                        response = requests.get(api_url, params=params, timeout=15)
                         
                         bg_rows = []
                         status_counts = {'all': 0, 'queued': 0, 'running': 0, 'done': 0, 'error': 0}
                         
-                        for row in db_rows:
-                            status = (row.get('status') or 'queued').lower()
-                            status_counts['all'] += 1
-                            if status in status_counts:
-                                status_counts[status] += 1
+                        if response.status_code == 200:
+                            api_data = response.json()
                             
-                            # Get metro_name directly from JOIN
-                            metro_name = row.get('metro_name') or ''
-                            
-                            bg_rows.append({
-                                'id': row.get('id'),
-                                'link': row.get('link') or '',
-                                'name': row.get('name') or '',
-                                'metro_name': metro_name,
-                                'run_interval_minutes': row.get('run_interval_minutes') or 0,
-                                'next_run': row.get('next_run'),
-                                'processed_at': row.get('processed_at'),
-                                'status': status,
-                                'error_message': row.get('error_message') or '',
-                                'price_changes': row.get('price_changes'),
-                                'apartments_added': row.get('apartments_added'),
-                                'apartments_subtracted': row.get('apartments_subtracted'),
-                                'total_listings': row.get('total_listings'),
-                                'steps': {}
-                            })
+                            # API returns {success: true, count: X, items: [...]}
+                            if isinstance(api_data, dict) and api_data.get('success') and 'items' in api_data:
+                                all_jobs = api_data['items']
+                                log_to_file(f"[Networks] BG: API returned {len(all_jobs)} jobs")
+                                
+                                for row in all_jobs:
+                                    status = (row.get('status') or 'queued').lower()
+                                    status_counts['all'] += 1
+                                    if status in status_counts:
+                                        status_counts[status] += 1
+                                    
+                                    bg_rows.append({
+                                        'id': row.get('id'),
+                                        'link': row.get('link') or '',
+                                        'name': row.get('name') or '',
+                                        'metro_name': row.get('metro_name') or '',
+                                        'run_interval_minutes': row.get('run_interval_minutes') or 0,
+                                        'next_run': row.get('next_run'),
+                                        'processed_at': row.get('processed_at'),
+                                        'status': status,
+                                        'error_message': row.get('last_error') or '',
+                                        'price_changes': row.get('price_changes'),
+                                        'apartments_added': row.get('apartments_added'),
+                                        'apartments_subtracted': row.get('apartments_subtracted'),
+                                        'total_listings': row.get('total_listings'),
+                                        'steps': {}
+                                    })
+                            else:
+                                log_to_file(f"[Networks] BG: API returned unexpected format: {str(api_data)[:200]}")
+                        else:
+                            log_to_file(f"[Networks] BG: API request failed with status {response.status_code}")
+                        
+                        # Fetch stats from network_daily_stats for today and merge
+                        if bg_rows:
+                            try:
+                                from datetime import date
+                                import mysql.connector
+                                today_str = date.today().strftime("%Y-%m-%d")
+                                network_ids = [r['id'] for r in bg_rows if r.get('id')]
+                                if network_ids:
+                                    stats_conn = get_external_db()
+                                    stats_cursor = stats_conn.cursor(dictionary=True)
+                                    placeholders = ','.join(['%s'] * len(network_ids))
+                                    stats_cursor.execute(f"""
+                                        SELECT network_id, price_changes, apartments_added, apartments_subtracted, total_listings
+                                        FROM network_daily_stats
+                                        WHERE date = %s AND network_id IN ({placeholders})
+                                    """, [today_str] + network_ids)
+                                    stats_rows = stats_cursor.fetchall() or []
+                                    stats_cursor.close()
+                                    stats_conn.close()
+                                    
+                                    # Build lookup dict
+                                    stats_by_id = {r['network_id']: r for r in stats_rows}
+                                    log_to_file(f"[Networks] BG: Fetched stats for {len(stats_rows)} networks from network_daily_stats")
+                                    
+                                    # Merge stats into bg_rows
+                                    for row in bg_rows:
+                                        nid = row.get('id')
+                                        if nid and nid in stats_by_id:
+                                            s = stats_by_id[nid]
+                                            row['price_changes'] = s.get('price_changes', 0)
+                                            row['apartments_added'] = s.get('apartments_added', 0)
+                                            row['apartments_subtracted'] = s.get('apartments_subtracted', 0)
+                                            row['total_listings'] = s.get('total_listings', 0)
+                            except Exception as stats_err:
+                                log_to_file(f"[Networks] BG: Failed to fetch stats: {stats_err}")
+                        
                         log_to_file(f"[Networks] BG: Loaded {len(bg_rows)} networks, counts: {status_counts}")
                         
                         # Update UI on main thread
                         def _fill_tree():
                             try:
+                                # Check if user switched to a different tab - skip UI update
+                                if self._current_table.get() != 'queue_websites':
+                                    log_to_file(f"[Networks] UI: Tab changed to {self._current_table.get()}, skipping UI update")
+                                    self._refresh_in_progress = False
+                                    return
+                                
                                 log_to_file(f"[Networks] UI: Clearing tree")
                                 for item in queue_tree.get_children():
                                     queue_tree.delete(item)
@@ -7855,77 +8413,199 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 except Exception as col_err:
                     log_to_file(f"[Websites] Column config error: {col_err}")
                 
-                try:
-                    import mysql.connector
-                    if not silent:
-                        log_to_file(f"[Websites] Loading from google_places database...")
-                    
-                    conn = mysql.connector.connect(
-                        host='localhost',
-                        port=3306,
-                        user='root',
-                        password='',
-                        database='offta',
-                        connect_timeout=10
-                    )
-                    cursor = conn.cursor(dictionary=True)
-                    
-                    # Get selected metro name for filtering
-                    selected_metro = (self._metro_combo.get().strip() if hasattr(self, '_metro_combo') else "Seattle")
-                    if not selected_metro:
-                        selected_metro = "Seattle"
-                    
-                    # Filter by metro name and COUNT apartment_listings for each google_places
-                    cursor.execute("""
-                        SELECT 
-                            gp.id, 
-                            gp.Website, 
-                            gp.Name, 
-                            gp.availability_website,
-                            gp.availability_website_last_scraped,
-                            mm.metro_name,
-                            COUNT(al.id) as listing_count
-                        FROM google_places gp
-                        LEFT JOIN major_metros mm ON gp.major_metro_id = mm.id
-                        LEFT JOIN apartment_listings al ON al.google_places_id = gp.id
-                        WHERE gp.Website IS NOT NULL AND gp.Website != '' 
-                        AND mm.metro_name = %s
-                        GROUP BY gp.id, gp.Website, gp.Name, gp.availability_website, gp.availability_website_last_scraped, mm.metro_name
-                        ORDER BY 
-                            CASE 
-                                WHEN gp.availability_website LIKE '%http:%' OR gp.availability_website LIKE '%https:%' THEN 0 
-                                ELSE 1 
-                            END,
-                            gp.id DESC 
-                        LIMIT 200
-                    """, (selected_metro,))
-                    gps = cursor.fetchall()
-                    cursor.close()
-                    conn.close()
-                    
-                    rows = []
-                    for gp in gps:
-                        rows.append({
-                            'id': gp.get('id'),
-                            'link': gp.get('Website') or '',
-                            'name': gp.get('Name') or '',
-                            'metro_name': gp.get('metro_name') or 'Seattle',
-                            'availability_website': gp.get('availability_website') or '',
-                            'listing_count': gp.get('listing_count', 0),
-                            'run_interval_minutes': 0,
-                            'next_run': None,
-                            'processed_at': None,
-                            'status': 'queued',
-                            'steps': {}
-                        })
-                    custom_source = 'websites'
-                    if not silent:
-                        log_to_file(f"[Websites] ✓ Loaded {len(rows)} websites from database")
-                except Exception as e:
-                    error_occurred = True
-                    error_msg = f"Websites load failed: {str(e)[:80]}"
-                    log_to_file(f"[Websites] {error_msg}")
-                    rows = []
+                # Show loading with ETA (Websites query typically takes ~5-10s)
+                self._loading_table_name = "Websites"
+                if not silent and hasattr(self, '_show_loading'):
+                    self._root.after(0, self._show_loading)
+                if hasattr(self, '_start_eta'):
+                    self._start_eta(8)
+                
+                # Disable tab buttons during loading
+                if hasattr(self, '_tab_buttons'):
+                    for btn in self._tab_buttons.values():
+                        try:
+                            btn.config(state='disabled', cursor='wait')
+                        except Exception:
+                            pass
+                
+                # Capture tree reference and metro value before background thread
+                websites_queue_tree = self._queue_tree
+                selected_metro_val = (self._metro_combo.get().strip() if hasattr(self, '_metro_combo') else "Seattle")
+                if not selected_metro_val:
+                    selected_metro_val = "Seattle"
+                
+                def _bg_load_websites():
+                    """Background thread to load Websites data"""
+                    bg_rows = []
+                    try:
+                        import mysql.connector
+                        log_to_file(f"[Websites] BG: Loading from google_places for metro={selected_metro_val}...")
+                        
+                        conn = get_external_db()
+                        cursor = conn.cursor(dictionary=True)
+                        
+                        # Filter by metro name and COUNT apartment_listings for each google_places
+                        # Column is Availability_Website (capital A), no last_scraped column exists
+                        cursor.execute("""
+                            SELECT 
+                                gp.id, 
+                                gp.Website, 
+                                gp.Name, 
+                                gp.Availability_Website,
+                                gp.last_checked,
+                                mm.metro_name,
+                                COUNT(al.id) as listing_count
+                            FROM google_places gp
+                            LEFT JOIN major_metros mm ON gp.major_metro_id = mm.id
+                            LEFT JOIN apartment_listings al ON al.google_places_id = gp.id
+                            WHERE gp.Website IS NOT NULL AND gp.Website != '' 
+                            AND mm.metro_name = %s
+                            GROUP BY gp.id, gp.Website, gp.Name, gp.Availability_Website, gp.last_checked, mm.metro_name
+                            ORDER BY 
+                                CASE 
+                                    WHEN gp.Availability_Website LIKE '%%http:%%' OR gp.Availability_Website LIKE '%%https:%%' THEN 0 
+                                    ELSE 1 
+                                END,
+                                gp.id DESC 
+                            LIMIT 200
+                        """, (selected_metro_val,))
+                        gps = cursor.fetchall()
+                        cursor.close()
+                        conn.close()
+                        
+                        for gp in gps:
+                            bg_rows.append({
+                                'id': gp.get('id'),
+                                'link': gp.get('Website') or '',
+                                'name': gp.get('Name') or '',
+                                'metro_name': gp.get('metro_name') or 'Seattle',
+                                'availability_website': gp.get('Availability_Website') or '',
+                                'last_checked': gp.get('last_checked'),
+                                'listing_count': gp.get('listing_count', 0),
+                                'run_interval_minutes': 0,
+                                'next_run': None,
+                                'processed_at': None,
+                                'status': 'queued',
+                                'steps': {}
+                            })
+                        
+                        log_to_file(f"[Websites] BG: Loaded {len(bg_rows)} websites")
+                        
+                        # Update UI on main thread
+                        def _fill_websites_tree():
+                            try:
+                                # Check if user switched to a different tab - skip UI update
+                                current_tab = self._current_table.get()
+                                if current_tab not in ('listing_websites', 'websites'):
+                                    log_to_file(f"[Websites] UI: Tab changed to {current_tab}, skipping UI update")
+                                    self._refresh_in_progress = False
+                                    return
+                                
+                                log_to_file(f"[Websites] UI: Clearing tree")
+                                for item in websites_queue_tree.get_children():
+                                    websites_queue_tree.delete(item)
+                                
+                                log_to_file(f"[Websites] UI: Inserting {len(bg_rows)} rows")
+                                for idx, row in enumerate(bg_rows):
+                                    row_id = row.get('id', '')
+                                    avail_site = str(row.get('availability_website', '')).strip()
+                                    
+                                    # Status indicator based on availability_website
+                                    if avail_site and 'http' in avail_site.lower():
+                                        id_with_play = f"✅ {row_id}"
+                                    else:
+                                        id_with_play = f"❌ {row_id}"
+                                    
+                                    tag = "even" if idx % 2 == 0 else "odd"
+                                    row_number = idx + 1
+                                    avail_display = avail_site[:40] + '...' if len(avail_site) > 40 else avail_site
+                                    
+                                    # Format last_checked timestamp
+                                    last_checked = row.get('last_checked', '')
+                                    last_checked_display = ''
+                                    if last_checked:
+                                        from datetime import datetime
+                                        try:
+                                            if isinstance(last_checked, str):
+                                                dt = datetime.strptime(last_checked, '%Y-%m-%d %H:%M:%S')
+                                            else:
+                                                dt = last_checked
+                                            delta = datetime.now() - dt
+                                            if delta.days > 0:
+                                                last_checked_display = f"{delta.days}d ago"
+                                            elif delta.seconds >= 3600:
+                                                last_checked_display = f"{delta.seconds // 3600}h ago"
+                                            else:
+                                                last_checked_display = f"{delta.seconds // 60}m ago"
+                                        except Exception:
+                                            last_checked_display = str(last_checked)[:16]
+                                    
+                                    # Websites: 16 columns - #, ID, Link, Metro, Name, Avail Website, Last Checked, Status, Δ$, +, -, Total, ▶️, ✏️, hidden1, hidden2
+                                    values_tuple = (
+                                        row_number,                          # #
+                                        id_with_play,                        # ID
+                                        row.get('link', '')[:50],            # Link (truncated)
+                                        row.get('metro_name', ''),           # Metro
+                                        row.get('name', '')[:30],            # Name (truncated)
+                                        avail_display,                       # Avail Website
+                                        last_checked_display,                # Last Checked
+                                        'queued',                            # Status
+                                        '-',                                 # Δ$
+                                        '-',                                 # +
+                                        '-',                                 # -
+                                        row.get('listing_count', 0),         # Total
+                                        "▶️",                                # Play button
+                                        "✏️",                                # Edit button
+                                        row.get('availability_website', ''), # hidden1 (full URL)
+                                        ""                                   # hidden2
+                                    )
+                                    websites_queue_tree.insert("", "end", values=values_tuple, tags=(tag,))
+                                
+                                # Update status label
+                                if hasattr(self, '_queue_status_label'):
+                                    self._queue_status_label.config(text=f"✓ Loaded {len(bg_rows)} websites for {selected_metro_val}")
+                                
+                                log_to_file(f"[Websites] UI: ✓ Tree populated with {len(bg_rows)} rows")
+                            except Exception as ui_err:
+                                log_to_file(f"[Websites] UI ERROR: {ui_err}")
+                                import traceback
+                                traceback.print_exc()
+                            finally:
+                                if hasattr(self, '_hide_loading'):
+                                    self._hide_loading()
+                                self._refresh_in_progress = False
+                                # Re-enable tab buttons
+                                if hasattr(self, '_tab_buttons'):
+                                    for btn in self._tab_buttons.values():
+                                        try:
+                                            btn.config(state='normal', cursor='hand2')
+                                        except Exception:
+                                            pass
+                        
+                        self._root.after(0, _fill_websites_tree)
+                        
+                    except Exception as e:
+                        log_to_file(f"[Websites] BG ERROR: {str(e)[:80]}")
+                        import traceback
+                        traceback.print_exc()
+                        def _show_error():
+                            if hasattr(self, '_hide_loading'):
+                                self._hide_loading()
+                            self._refresh_in_progress = False
+                            # Re-enable tab buttons
+                            if hasattr(self, '_tab_buttons'):
+                                for btn in self._tab_buttons.values():
+                                    try:
+                                        btn.config(state='normal', cursor='hand2')
+                                    except Exception:
+                                        pass
+                            if hasattr(self, '_queue_status_label'):
+                                self._queue_status_label.config(text=f"Error loading websites: {str(e)[:50]}")
+                        self._root.after(0, _show_error)
+                
+                # Start background thread and RETURN immediately
+                threading.Thread(target=_bg_load_websites, daemon=True).start()
+                return  # EXIT EARLY - don't process the rows variable below
             elif str(current_table).lower() == 'accounts':
                         # Special handling for Accounts tab: list accounts via API with optional search filter
                         try:
@@ -8156,6 +8836,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         item_id = self._queue_tree.insert("", "end", values=(
                             id_display,                        # ID column with row number
                             address,                           # Address column
+                            row.get('network_id', ''),         # Network column
                             row.get('metro_name', ''),         # Metro column
                             image_status,                      # Image column (Yes/No/Done)
                             "✏️"                               # Edit button
@@ -8407,14 +9088,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 import mysql.connector
                 from datetime import datetime, timedelta
                 
-                conn = mysql.connector.connect(
-                    host='localhost',
-                    user='local_uzr',
-                    password='fuck',
-                    database='offta',
-                    port=3306,
-                    connection_timeout=5
-                )
+                conn = get_external_db()
                 cursor = conn.cursor(dictionary=True)
                 
                 # Find all jobs where: status='done' AND (processed_at + run_interval_minutes) <= NOW
@@ -8471,12 +9145,517 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 
                 # Check if any jobs need to be auto-queued (time is up)
                 self._check_auto_queue_jobs()
+                
+                # Update external pending timestamp API (every minute)
+                try:
+                    import requests
+                    requests.get('https://api.trustyhousing.com/manual_upload/log_pending_timestamp.php?action=update', timeout=5)
+                except Exception:
+                    pass  # Silent failure - don't log every minute
             except Exception as e:
                 log_to_file(f"[Queue] Auto-refresh error: {e}")
             finally:
                 root.after(60000, _auto_refresh_tick)  # Schedule next check (1 minute)
         
         root.after(60000, _auto_refresh_tick)  # First check after 1 minute
+        
+        # ========== PENDING JOBS WINDOW ==========
+        # Create small always-on-top window showing next 5 queued jobs
+        pending_window = tk.Toplevel(root)
+        self._pending_window = pending_window  # Store reference
+        self._pending_window_visible = True  # Track visibility state
+        pending_window.title("Pending Jobs")
+        pending_window.attributes('-topmost', True)  # Always on top
+        pending_window.resizable(False, False)
+        
+        # Calculate position: upper 35% of left side (to fit parcel automation below)
+        screen_width = pending_window.winfo_screenwidth()
+        screen_height = pending_window.winfo_screenheight()
+        window_width = int(screen_width * 0.20)  # 20% of screen width
+        window_height = int(screen_height * 0.35)  # Upper 35% of screen height
+        x_position = 0  # Left edge
+        y_position = 0  # Top edge
+        
+        pending_window.geometry(f"{window_width}x{window_height}+{x_position}+{y_position}")
+        
+        # Window content
+        pending_frame = tk.Frame(pending_window, bg=bg, bd=0, highlightthickness=1, highlightbackground="#2A2F35")
+        pending_frame.pack(fill="both", expand=True)
+        
+        # Header
+        pending_header = tk.Frame(pending_frame, bg=bg)
+        pending_header.pack(fill="x", padx=4, pady=(6, 0))
+        
+        pending_title = tk.Label(pending_header, text="⏳ Pending Jobs", font=("Segoe UI", 10, "bold"), fg=fg, bg=bg)
+        pending_title.pack(side="left")
+        
+        # Animated polling indicator
+        polling_indicator = tk.Label(pending_header, text="●", font=("Segoe UI", 8), fg=ok, bg=bg)
+        polling_indicator.pack(side="left", padx=(4, 0))
+        
+        # Last updated timestamp
+        last_updated_label = tk.Label(pending_header, text="", font=("Segoe UI", 7), fg=muted, bg=bg)
+        last_updated_label.pack(side="left", padx=(4, 0))
+        
+        # Pause/Play button
+        auto_refresh_paused = [False]  # Use list to allow modification in nested function
+        pause_play_btn = tk.Label(pending_header, text="⏸", font=("Segoe UI", 10), fg=accent, bg=bg, cursor="hand2")
+        pause_play_btn.pack(side="right", padx=(0, 4))
+        
+        def _toggle_pause(e=None):
+            auto_refresh_paused[0] = not auto_refresh_paused[0]
+            if auto_refresh_paused[0]:
+                pause_play_btn.config(text="▶")
+                _update_status("Paused")
+            else:
+                pause_play_btn.config(text="⏸")
+                _update_status("Resumed - waiting for next refresh")
+                # Restart animations
+                _animate_progress()
+        
+        pause_play_btn.bind("<Button-1>", _toggle_pause)
+        
+        # Refresh button
+        refresh_btn = tk.Label(pending_header, text="🔄", font=("Segoe UI", 10), fg=accent, bg=bg, cursor="hand2")
+        refresh_btn.pack(side="right", padx=(0, 4))
+        
+        # Progress bar for waiting animation
+        progress_frame = tk.Frame(pending_frame, bg=bg, height=3)
+        progress_frame.pack(fill="x", padx=0, pady=(2, 0))
+        
+        progress_canvas = tk.Canvas(progress_frame, bg="#1A1D20", height=3, highlightthickness=0)
+        progress_canvas.pack(fill="x")
+        
+        progress_bar = progress_canvas.create_rectangle(0, 0, 0, 3, fill=accent, outline="")
+        progress_position = [0]  # Current position of progress bar
+        
+        # Status log label (below progress bar)
+        status_log_label = tk.Label(pending_frame, text="Idle - waiting for jobs...", font=("Segoe UI", 7), fg=muted, bg=bg, anchor="w")
+        status_log_label.pack(fill="x", padx=4, pady=(2, 4))
+        
+        def _update_status(message):
+            """Update the status log with current action"""
+            try:
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                status_log_label.config(text=f"[{timestamp}] {message}")
+            except Exception:
+                pass
+        
+        def _animate_progress():
+            try:
+                if pending_window.winfo_exists() and not auto_refresh_paused[0]:
+                    width = progress_canvas.winfo_width()
+                    if width > 1:
+                        # Move progress bar 2 pixels to the right
+                        progress_position[0] = (progress_position[0] + 2) % (width + 40)
+                        
+                        # Calculate bar position (40px wide bar)
+                        bar_start = progress_position[0] - 40
+                        bar_end = progress_position[0]
+                        
+                        # Wrap around if needed
+                        if bar_start < 0:
+                            bar_start = 0
+                        
+                        progress_canvas.coords(progress_bar, bar_start, 0, bar_end, 3)
+                    
+                    pending_window.after(30, _animate_progress)
+            except Exception:
+                pass
+        
+        # Scrollable list body
+        pending_body = tk.Frame(pending_frame, bg=bg)
+        pending_body.pack(fill="both", expand=True, padx=0, pady=(8, 0))
+        
+        canvas = tk.Canvas(pending_body, bg=bg, highlightthickness=0)
+        scrollbar = tk.Scrollbar(pending_body, orient="vertical", command=canvas.yview)
+        pending_list_frame = tk.Frame(canvas, bg=bg)
+        
+        pending_list_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        
+        canvas.create_window((0, 0), window=pending_list_frame, anchor="nw", width=window_width-20)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Refresh function
+        def _refresh_pending():
+            from datetime import datetime
+            try:
+                _update_status("Fetching pending jobs from database...")
+                
+                # Update timestamp
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                display_time = datetime.now().strftime("%I:%M:%S %p")
+                last_updated_label.config(text=f"Updated: {display_time}")
+                
+                # Insert timestamp into local database and send to external via API
+                try:
+                    import mysql.connector
+                    import requests
+                    
+                    # Local database
+                    try:
+                        log_conn = get_external_db()
+                        log_cursor = log_conn.cursor()
+                        log_cursor.execute("INSERT INTO pending_jobs_log (checked_at) VALUES (%s)", (current_time,))
+                        log_conn.commit()
+                        log_cursor.close()
+                        log_conn.close()
+                        log_to_file(f"[Pending] Timestamp logged to local database: {current_time}")
+                    except Exception as local_err:
+                        log_to_file(f"[Pending] Could not log to local database: {local_err}")
+                    
+                    # Send to external database via API
+                    try:
+                        api_url = "https://api.trustyhousing.com/manual_upload/log_pending_timestamp.php"
+                        response = requests.post(api_url, data={'timestamp': current_time}, timeout=5)
+                        if response.status_code == 200:
+                            log_to_file(f"[Pending] Timestamp sent to external API: {current_time}")
+                        else:
+                            log_to_file(f"[Pending] External API returned status {response.status_code}")
+                    except Exception as api_err:
+                        log_to_file(f"[Pending] Could not send to external API: {api_err}")
+                        
+                except Exception as db_err:
+                    log_to_file(f"[Pending] Database logging error: {db_err}")
+                
+                # Get jobs from external API instead of local database
+                import requests
+                try:
+                    api_url = "https://api.trustyhousing.com/user/admin/get-queue-websites.php"
+                    params = {
+                        'limit': 50  # Get more to fill if needed
+                    }
+                    
+                    log_to_file(f"[Pending] Fetching jobs from external API: {api_url}")
+                    response = requests.get(api_url, params=params, timeout=10)
+                    
+                    if response.status_code == 200:
+                        api_data = response.json()
+                        
+                        # API returns {success: true, count: X, items: [...]}
+                        if isinstance(api_data, dict) and api_data.get('success') and 'items' in api_data:
+                            all_jobs = api_data['items']
+                            log_to_file(f"[Pending] API response: {api_data.get('count', 0)} total jobs")
+                            
+                            # Filter queued jobs and sort by updated_at DESC
+                            queued_jobs = [j for j in all_jobs if j.get('status') == 'queued']
+                            queued_jobs = sorted(queued_jobs, key=lambda x: x.get('updated_at', ''), reverse=True)
+                            
+                            # If less than 5 queued, add done jobs that will be requeued soon
+                            jobs = queued_jobs[:5]
+                            if len(jobs) < 5:
+                                from datetime import datetime, timedelta
+                                now = datetime.now()
+                                
+                                # Get done jobs with requeue info
+                                done_jobs = [j for j in all_jobs if j.get('status') == 'done' and j.get('processed_at') and j.get('run_interval_minutes')]
+                                
+                                # Calculate requeue time for each
+                                for job in done_jobs:
+                                    try:
+                                        processed_at = datetime.strptime(job['processed_at'], '%Y-%m-%d %H:%M:%S')
+                                        interval_minutes = int(job['run_interval_minutes'])
+                                        requeue_time = processed_at + timedelta(minutes=interval_minutes)
+                                        minutes_until_queued = int((requeue_time - now).total_seconds() / 60)
+                                        job['_minutes_until_queued'] = max(0, minutes_until_queued)
+                                    except:
+                                        job['_minutes_until_queued'] = 999999
+                                
+                                # Sort by soonest to be requeued
+                                done_jobs = sorted(done_jobs, key=lambda x: x.get('_minutes_until_queued', 999999))
+                                
+                                # Add to fill up to 5
+                                jobs.extend(done_jobs[:5 - len(jobs)])
+                            
+                            log_to_file(f"[Pending] Displaying {len(jobs)} jobs ({len([j for j in jobs if j.get('status') == 'queued'])} queued)")
+                        else:
+                            log_to_file(f"[Pending] API returned unexpected format: {str(api_data)[:200]}")
+                            jobs = []
+                    else:
+                        log_to_file(f"[Pending] API request failed with status {response.status_code}")
+                        jobs = []
+                        
+                except requests.RequestException as req_err:
+                    log_to_file(f"[Pending] API request error: {req_err}")
+                    jobs = []
+                except Exception as api_err:
+                    log_to_file(f"[Pending] Error fetching from API: {api_err}")
+                    jobs = []
+                
+                # Clear existing items
+                for widget in pending_list_frame.winfo_children():
+                    widget.destroy()
+                
+                # Display jobs
+                if jobs:
+                    for idx, job in enumerate(jobs, 1):
+                        error_message = job.get('last_error', '')
+                        has_error = error_message and error_message.strip()
+                        
+                        # Red background if error exists
+                        frame_bg = "#3D1F1F" if has_error else chip_bg
+                        border_color = err if has_error else chip_bg
+                        
+                        job_frame = tk.Frame(pending_list_frame, bg=frame_bg, bd=1, relief="solid", highlightbackground=border_color, highlightthickness=1)
+                        job_frame.pack(fill="x", padx=0, pady=2)
+                        
+                        # Job number and ID
+                        job_header = tk.Frame(job_frame, bg=frame_bg)
+                        job_header.pack(fill="x", padx=4, pady=2)
+                        
+                        # Queue position number
+                        job_num = tk.Label(job_header, text=f"#{idx}", font=("Segoe UI", 9, "bold"), fg=accent, bg=frame_bg)
+                        job_num.pack(side="left")
+                        
+                        # Database ID from queue_websites table
+                        job_id_label = tk.Label(job_header, text=f"DB ID: {job['id']}", font=("Segoe UI", 8), fg=muted, bg=frame_bg)
+                        job_id_label.pack(side="left", padx=(8, 0))
+                        
+                        # Type bubble (e.g., "Parcel", "Network", etc.)
+                        job_type = job.get('type', 'N/A')
+                        if job_type and job_type != 'N/A':
+                            type_bubble = tk.Label(job_header, text=job_type, font=("Segoe UI", 7, "bold"), 
+                                                    fg="#FFFFFF", bg=accent, padx=6, pady=1)
+                            type_bubble.pack(side="left", padx=(6, 0))
+                        
+                        # Error indicator
+                        if has_error:
+                            error_icon = tk.Label(job_header, text="⚠", font=("Segoe UI", 9), fg=err, bg=frame_bg)
+                            error_icon.pack(side="left", padx=(4, 0))
+                        
+                        # Calculate minutes until this job runs (estimated: position * 2 minutes per job)
+                        estimated_minutes = idx * 2
+                        time_label = tk.Label(job_header, text=f"~{estimated_minutes}m", font=("Segoe UI", 7, "bold"), fg=warn if estimated_minutes < 5 else muted, bg=frame_bg)
+                        time_label.pack(side="right")
+                        
+                        # Source info (source_id, capture_mode)
+                        source_info_frame = tk.Frame(job_frame, bg=frame_bg)
+                        source_info_frame.pack(fill="x", padx=4, pady=2)
+                        
+                        source_id = job.get('source_id', 'N/A')
+                        capture_mode = job.get('capture_mode', 'N/A')
+                        
+                        source_label = tk.Label(source_info_frame, text=f"Source ID: {source_id} | Mode: {capture_mode}", 
+                                               font=("Segoe UI", 7), fg=muted, bg=frame_bg)
+                        source_label.pack(side="left")
+                        
+                        # Updated at timestamp (full format)
+                        updated_at = job.get('updated_at', 'N/A')
+                        if updated_at and updated_at != 'N/A':
+                            from datetime import datetime
+                            try:
+                                if isinstance(updated_at, str):
+                                    updated_dt = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+                                else:
+                                    updated_dt = updated_at
+                                updated_display = updated_dt.strftime("%m/%d/%y %H:%M")
+                            except:
+                                updated_display = str(updated_at)
+                        else:
+                            updated_display = "N/A"
+                        
+                        updated_label = tk.Label(source_info_frame, text=f"Updated: {updated_display}", 
+                                                font=("Segoe UI", 7), fg=muted, bg=frame_bg)
+                        updated_label.pack(side="right")
+                        
+                        # Link row with play button
+                        link_frame = tk.Frame(job_frame, bg=frame_bg)
+                        link_frame.pack(fill="x", padx=4, pady=(0, 2))
+                        
+                        # Play button to open link or execute automation
+                        full_link = job.get('link', '')
+                        job_type = job.get('type', '')
+                        job_id = job.get('id')
+                        source_id = job.get('source_id')
+                        
+                        def open_link(e=None, url=full_link, jtype=job_type, jid=job_id, src_id=source_id):
+                            import subprocess
+                            import sys
+                            
+                            # Check if this is a Parcel type - launch parcel automation
+                            if jtype and jtype.lower() == 'parcel':
+                                log_to_file(f"[Pending] Launching Parcel automation for parcel ID {src_id}")
+                                try:
+                                    # Get parcel data from database
+                                    import mysql.connector
+                                    conn = get_external_db()
+                                    cursor = conn.cursor()
+                                    cursor.execute("SELECT id, Address FROM king_county_parcels WHERE id = %s", (src_id,))
+                                    result = cursor.fetchone()
+                                    cursor.close()
+                                    conn.close()
+                                    
+                                    if result:
+                                        parcel_data = {
+                                            'id': result[0],
+                                            'address': result[1] if len(result) > 1 else '',
+                                            'metro_name': 'Seattle',  # Default to Seattle for King County
+                                            'parcel_link': url if url else ''
+                                        }
+                                        
+                                        # Launch parcel automation with auto_start=True
+                                        from parcel_automation import launch_parcel_automation
+                                        launch_parcel_automation(root, parcel_data, [parcel_data], auto_start=True)
+                                        log_to_file(f"[Pending] Launched Parcel automation for parcel ID {src_id} with auto-start")
+                                    else:
+                                        log_to_file(f"[Pending] Parcel ID {src_id} not found in database")
+                                except Exception as parcel_err:
+                                    log_to_file(f"[Pending] Failed to launch Parcel automation: {parcel_err}")
+                                    import traceback
+                                    traceback.print_exc()
+                                return
+                            
+                            # For non-Parcel types, open the link in browser
+                            if url and job_type != 'Parcel':
+                                try:
+                                    # Get screen dimensions
+                                    screen_width = pending_window.winfo_screenwidth()
+                                    screen_height = pending_window.winfo_screenheight()
+                                    
+                                    # Calculate 75% width on right side
+                                    browser_width = int(screen_width * 0.75)
+                                    browser_x = screen_width - browser_width  # Right side
+                                    
+                                    # Try Chrome first with window positioning
+                                    chrome_paths = [
+                                        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                                        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                                        r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
+                                    ]
+                                    
+                                    chrome_found = False
+                                    for chrome_path in chrome_paths:
+                                        import os
+                                        expanded_path = os.path.expandvars(chrome_path)
+                                        if os.path.exists(expanded_path):
+                                            subprocess.Popen([
+                                                expanded_path,
+                                                f"--window-position={browser_x},0",
+                                                f"--window-size={browser_width},{screen_height}",
+                                                url
+                                            ])
+                                            chrome_found = True
+                                            break
+                                    
+                                    if not chrome_found:
+                                        # Fallback to default browser
+                                        import webbrowser
+                                        webbrowser.open(url)
+                                except Exception as e:
+                                    log_to_file(f"[Pending] Error opening browser: {e}")
+                                    # Fallback to default browser
+                                    import webbrowser
+                                    webbrowser.open(url)
+                        
+                        play_btn = tk.Label(link_frame, text="▶", font=("Segoe UI", 9), fg=ok, bg=frame_bg, cursor="hand2")
+                        play_btn.pack(side="left", padx=(0, 4))
+                        play_btn.bind("<Button-1>", open_link)
+                        
+                        # Link display (only clickable for non-Parcel types)
+                        link_text = job.get('link', 'No link')
+                        if job_type == 'Parcel':
+                            # For Parcel type, make address non-clickable (only Play button works)
+                            link_label = tk.Label(link_frame, text=link_text, font=("Segoe UI", 7), fg=muted, bg=frame_bg, anchor="w")
+                        else:
+                            # For other types, keep address clickable
+                            link_label = tk.Label(link_frame, text=link_text, font=("Segoe UI", 7), fg=accent, bg=frame_bg, anchor="w", cursor="hand2")
+                            link_label.bind("<Button-1>", open_link)
+                        link_label.pack(side="left", fill="x", expand=True)
+                        
+                        # Click handler to show error message
+                        if has_error:
+                            def show_error(e, msg=error_message):
+                                import tkinter.messagebox as messagebox
+                                messagebox.showerror("Job Error", f"Error for Job ID {job['id']}:\n\n{msg}")
+                            
+                            job_frame.bind("<Button-1>", show_error)
+                            job_header.bind("<Button-1>", show_error)
+                            job_num.bind("<Button-1>", show_error)
+                            job_id_label.bind("<Button-1>", show_error)
+                            source_info_frame.bind("<Button-1>", show_error)
+                            source_label.bind("<Button-1>", show_error)
+                            updated_label.bind("<Button-1>", show_error)
+                            
+                            # Change cursor to indicate clickable
+                            job_frame.config(cursor="hand2")
+                            for widget in [job_num, job_id_label, source_label, updated_label]:
+                                widget.config(cursor="hand2")
+                    
+                    _update_status(f"Loaded {len(jobs)} pending job(s) - next refresh in 30s")
+                else:
+                    no_jobs_label = tk.Label(pending_list_frame, text="No pending jobs", font=("Segoe UI", 9), fg=muted, bg=bg)
+                    no_jobs_label.pack(pady=20)
+                    _update_status("Idle - no pending jobs found")
+                    
+            except Exception as e:
+                log_to_file(f"[Pending] Error refreshing: {e}")
+                _update_status(f"Error: {str(e)[:40]}")
+                # Show error in window
+                for widget in pending_list_frame.winfo_children():
+                    widget.destroy()
+                error_label = tk.Label(pending_list_frame, text=f"Error: {str(e)[:30]}", font=("Segoe UI", 8), fg=err, bg=bg)
+                error_label.pack(pady=20)
+        
+        # Bind refresh button click
+        refresh_btn.bind("<Button-1>", lambda e: _refresh_pending())
+        
+        # Animate polling indicator (pulse effect)
+        def _animate_indicator():
+            try:
+                if pending_window.winfo_exists():
+                    # Cycle through colors for pulse effect
+                    current_color = polling_indicator.cget("fg")
+                    if current_color == ok:
+                        polling_indicator.config(fg=accent)
+                    else:
+                        polling_indicator.config(fg=ok)
+                    pending_window.after(500, _animate_indicator)
+            except Exception:
+                pass
+        
+        # Fetch external timestamp from API every 60 seconds (also runs from main Queue timer)
+        def _fetch_external_timestamp():
+            try:
+                if pending_window.winfo_exists():
+                    import requests
+                    try:
+                        response = requests.get('https://api.trustyhousing.com/manual_upload/log_pending_timestamp.php?action=update', timeout=5)
+                        if response.status_code == 200:
+                            data = response.json()
+                            log_to_file(f"[Pending] External API update - {data.get('message', 'success')}")
+                    except Exception as api_err:
+                        log_to_file(f"[Pending] External API update failed: {api_err}")
+                    
+                    pending_window.after(60000, _fetch_external_timestamp)  # Changed to 60 seconds
+            except Exception:
+                pass
+        
+        # Auto-refresh every 30 seconds
+        def _auto_refresh_pending():
+            try:
+                if pending_window.winfo_exists():
+                    if not auto_refresh_paused[0]:
+                        _update_status("Auto-refresh triggered - fetching jobs...")
+                        _refresh_pending()
+                    else:
+                        _update_status("Paused - auto-refresh skipped")
+                    pending_window.after(30000, _auto_refresh_pending)
+            except Exception:
+                pass
+        
+        # Initial load and start auto-refresh
+        _refresh_pending()
+        pending_window.after(30000, _auto_refresh_pending)
+        _fetch_external_timestamp()  # Start external API polling
+        _animate_indicator()  # Start animation
+        _animate_progress()  # Start progress bar animation
+        
+        self._pending_window = pending_window
+        # ========== END PENDING JOBS WINDOW ==========
         
         # Show accounts table (separate from queue/extraction)
         def _show_accounts_table(self=self):
@@ -8777,14 +9956,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             
                             _ui_status("Loading alerts...")
                             
-                            conn = mysql.connector.connect(
-                                host='localhost',
-                                port=3306,
-                                user='root',
-                                password='',
-                                database='offta',
-                                connect_timeout=10
-                            )
+                            conn = get_external_db()
                             cursor = conn.cursor(dictionary=True)
                             cursor.execute("""
                                 SELECT id, type, title, subtitle, body, Sent_every, 
@@ -9169,2109 +10341,6 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 print(f"[Notifications] Notifications button handler error: {ex}")
         notifications_btn.bind("<Button-1>", _on_notifications_btn)
         
-        # Bind Sync DB button - uploads affected tables to remote server
-        def _on_sync_btn(_e):
-            try:
-                log_to_file("[Sync] Sync DB button clicked")
-                print("[Sync] Sync DB button clicked")
-                
-                from tkinter import messagebox, ttk
-                import subprocess
-                import tempfile
-                import os
-                from datetime import datetime
-                import mysql.connector
-                
-                # Create menu window to choose sync type
-                menu_win = tk.Toplevel(root)
-                menu_win.title("Database Sync Options")
-                menu_win.geometry("400x450")
-                menu_win.transient(root)
-                menu_win.grab_set()
-                menu_win.resizable(False, False)
-                
-                # Center window on screen
-                menu_win.update_idletasks()
-                screen_width = menu_win.winfo_screenwidth()
-                screen_height = menu_win.winfo_screenheight()
-                x = (screen_width // 2) - (400 // 2)
-                y = (screen_height // 2) - (450 // 2)
-                menu_win.geometry(f"400x450+{x}+{y}")
-                
-                # Header
-                header = tk.Frame(menu_win, bg="#2C3E50", height=70)
-                header.pack(fill="x")
-                header.pack_propagate(False)
-                
-                tk.Label(
-                    header,
-                    text="🔄 Database Sync Options",
-                    font=("Segoe UI", 14, "bold"),
-                    bg="#2C3E50",
-                    fg="white"
-                ).pack(pady=20)
-                
-                # Content
-                content = tk.Frame(menu_win, bg="white")
-                content.pack(fill="both", expand=True, padx=20, pady=20)
-                
-                tk.Label(
-                    content,
-                    text="Choose sync operation:",
-                    font=("Segoe UI", 10),
-                    bg="white",
-                    fg="#2C3E50"
-                ).pack(pady=(0, 15))
-                
-                def open_db_sync():
-                    menu_win.destroy()
-                    _perform_db_sync()
-                
-                def open_911_sync():
-                    menu_win.destroy()
-                    _perform_911_sync()
-                
-                def open_code_sync():
-                    menu_win.destroy()
-                    _perform_code_sync()
-                
-                # Button 1: Sync DB
-                btn1 = tk.Button(
-                    content,
-                    text="🔄 Sync DB",
-                    command=open_db_sync,
-                    bg="#16A085",
-                    fg="white",
-                    font=("Segoe UI", 11, "bold"),
-                    padx=20,
-                    pady=15,
-                    cursor="hand2",
-                    relief="flat"
-                )
-                btn1.pack(fill="x", pady=5)
-                
-                tk.Label(
-                    content,
-                    text="Sync apartment listings & network data",
-                    font=("Segoe UI", 8),
-                    bg="white",
-                    fg="#7F8C8D"
-                ).pack(pady=(0, 10))
-                
-                # Get 911 sync stats
-                try:
-                    import mysql.connector
-                    conn_temp = mysql.connector.connect(
-                        host='127.0.0.1',
-                        user='root',
-                        password='',
-                        database='offta'
-                    )
-                    cursor_temp = conn_temp.cursor(dictionary=True)
-                    
-                    # Count unsynced addresses
-                    cursor_temp.execute("""
-                        SELECT COUNT(*) as count 
-                        FROM google_addresses 
-                        WHERE (911_json IS NULL OR 911_json = '') 
-                        AND latitude IS NOT NULL 
-                        AND longitude IS NOT NULL
-                    """)
-                    result = cursor_temp.fetchone()
-                    unsynced_911 = result['count'] if result else 0
-                    
-                    # Get last sync date
-                    cursor_temp.execute("""
-                        SELECT last_sync_date, records_processed 
-                        FROM sync_metadata 
-                        WHERE sync_type = '911_calls'
-                    """)
-                    sync_info = cursor_temp.fetchone()
-                    last_sync_911 = sync_info['last_sync_date'].strftime('%m/%d %I:%M%p') if sync_info and sync_info['last_sync_date'] else 'Never'
-                    
-                    cursor_temp.close()
-                    conn_temp.close()
-                except Exception as e:
-                    unsynced_911 = '?'
-                    last_sync_911 = '?'
-                    log_to_file(f"[Sync Menu] Error getting 911 stats: {e}")
-                
-                # Button 2: Sync 911
-                btn2_text = f"🚨 Sync 911 Data ({unsynced_911} unsynced)"
-                btn2 = tk.Button(
-                    content,
-                    text=btn2_text,
-                    command=open_911_sync,
-                    bg="#E74C3C",
-                    fg="white",
-                    font=("Segoe UI", 11, "bold"),
-                    padx=20,
-                    pady=15,
-                    cursor="hand2",
-                    relief="flat"
-                )
-                btn2.pack(fill="x", pady=5)
-                
-                tk.Label(
-                    content,
-                    text=f"Match 911 calls to addresses • Last: {last_sync_911}",
-                    font=("Segoe UI", 8),
-                    bg="white",
-                    fg="#7F8C8D"
-                ).pack(pady=(0, 10))
-                
-                # Button 3: Sync Code
-                btn3 = tk.Button(
-                    content,
-                    text="⚠️ Sync Code Violations",
-                    command=open_code_sync,
-                    bg="#F39C12",
-                    fg="white",
-                    font=("Segoe UI", 11, "bold"),
-                    padx=20,
-                    pady=15,
-                    cursor="hand2",
-                    relief="flat"
-                )
-                btn3.pack(fill="x", pady=5)
-                
-                tk.Label(
-                    content,
-                    text="Match code violations to addresses",
-                    font=("Segoe UI", 8),
-                    bg="white",
-                    fg="#7F8C8D"
-                ).pack(pady=(0, 10))
-                
-                return  # Exit early, subfunctions will be called
-                
-            except Exception as ex:
-                log_to_file(f"[Sync] Sync button handler error: {ex}")
-                log_exception("Sync button handler error")
-                print(f"[Sync] Sync button handler error: {ex}")
-        
-        def _perform_db_sync():
-            """Original DB sync functionality"""
-            try:
-                from tkinter import messagebox, ttk
-                import subprocess
-                import tempfile
-                import os
-                from datetime import datetime
-                import mysql.connector
-                
-                # MySQL tools paths (XAMPP)
-                mysqldump_path = r"C:\xampp\mysql\bin\mysqldump.exe"
-                mysql_path = r"C:\xampp\mysql\bin\mysql.exe"
-                
-                # Check if MySQL tools exist
-                if not os.path.exists(mysqldump_path):
-                    messagebox.showerror(
-                        "MySQL Not Found",
-                        f"mysqldump not found at:\n{mysqldump_path}\n\nPlease verify XAMPP MySQL installation.",
-                        parent=root
-                    )
-                    return
-                
-                if not os.path.exists(mysql_path):
-                    messagebox.showerror(
-                        "MySQL Not Found",
-                        f"mysql not found at:\n{mysql_path}\n\nPlease verify XAMPP MySQL installation.",
-                        parent=root
-                    )
-                    return
-                
-                # Step 1: Show preloader and test remote connection
-                log_to_file("[Sync] Testing connection to remote database...")
-                self._set_last_line("[Sync] Connecting to remote...", "muted")
-                
-                # Create preloader window
-                preloader = tk.Toplevel(root)
-                preloader.title("Database Sync")
-                preloader.geometry("400x150")
-                preloader.transient(root)
-                preloader.grab_set()
-                preloader.resizable(False, False)
-                
-                # Center the preloader
-                preloader.update_idletasks()
-                x = root.winfo_x() + (root.winfo_width() // 2) - (400 // 2)
-                y = root.winfo_y() + (root.winfo_height() // 2) - (150 // 2)
-                preloader.geometry(f"400x150+{x}+{y}")
-                
-                preloader_frame = tk.Frame(preloader, bg="#2C3E50")
-                preloader_frame.pack(fill="both", expand=True, padx=20, pady=20)
-                
-                status_label = tk.Label(
-                    preloader_frame,
-                    text="🔄 Connecting to remote database...",
-                    font=("Segoe UI", 11, "bold"),
-                    bg="#2C3E50",
-                    fg="white"
-                )
-                status_label.pack(pady=10)
-                
-                detail_label = tk.Label(
-                    preloader_frame,
-                    text="Server: 172.104.206.182:3306",
-                    font=("Segoe UI", 9),
-                    bg="#2C3E50",
-                    fg="#BDC3C7"
-                )
-                detail_label.pack()
-                
-                # Progress bar
-                from tkinter import ttk
-                progress_bar = ttk.Progressbar(
-                    preloader_frame,
-                    mode='determinate',
-                    length=350,
-                    style='Custom.Horizontal.TProgressbar'
-                )
-                progress_bar.pack(pady=15)
-                
-                progress_label = tk.Label(
-                    preloader_frame,
-                    text="Step 1 of 3: Connecting...",
-                    font=("Segoe UI", 9),
-                    bg="#2C3E50",
-                    fg="#95A5A6"
-                )
-                progress_label.pack()
-                
-                # Configure progress bar style
-                style = ttk.Style()
-                style.theme_use('default')
-                style.configure(
-                    'Custom.Horizontal.TProgressbar',
-                    background='#3498DB',
-                    troughcolor='#1A1D20',
-                    borderwidth=0,
-                    thickness=8
-                )
-                
-                progress_bar['value'] = 0
-                preloader.update()
-                
-                try:
-                    # Test connection with longer timeout
-                    progress_bar['value'] = 10
-                    status_label.config(text="🔗 Testing connection...")
-                    detail_label.config(text="This may take up to 30 seconds...")
-                    progress_label.config(text="Step 1 of 3: Connecting...")
-                    preloader.update()
-                    
-                    test_conn = mysql.connector.connect(
-                        host="172.104.206.182",
-                        port=3306,
-                        user="seattlelisted_usr",
-                        password="T@5z6^pl}",
-                        database="offta",
-                        connect_timeout=30,
-                        connection_timeout=30
-                    )
-                    test_conn.close()
-                    
-                    progress_bar['value'] = 33
-                    status_label.config(text="✓ Connection successful!")
-                    detail_label.config(text="Fetching database information...", fg="#2ECC71")
-                    progress_label.config(text="Step 2 of 3: Discovering tables...")
-                    preloader.update()
-                    
-                    log_to_file("[Sync] ✓ Remote database connection successful")
-                    self._set_last_line("[Sync] ✓ Connected to remote", "ok")
-                    
-                except Exception as conn_err:
-                    preloader.destroy()
-                    log_to_file(f"[Sync] ✗ Cannot connect to remote database: {conn_err}")
-                    self._set_last_line("[Sync] ✗ Connection failed", "err")
-                    messagebox.showerror(
-                        "Remote Database Unavailable",
-                        f"Cannot connect to remote database:\n\n" +
-                        f"Server: 172.104.206.182:3306\n" +
-                        f"Database: offta\n" +
-                        f"Error: {conn_err}\n\n" +
-                        "Please check:\n" +
-                        "• Network connectivity\n" +
-                        "• MySQL server is running\n" +
-                        "• User has remote access permissions\n" +
-                        "• Firewall allows port 3306",
-                        parent=root
-                    )
-                    return
-                
-                # Step 2: Get list of all tables and compare databases
-                progress_bar['value'] = 40
-                status_label.config(text="📊 Discovering tables...")
-                detail_label.config(text="Fetching table list...", fg="#3498DB")
-                progress_label.config(text="Step 2 of 3: Fetching tables...")
-                preloader.update()
-                
-                log_to_file("[Sync] Discovering all tables...")
-                self._set_last_line("[Sync] Fetching table list...", "muted")
-                
-                table_diffs = []
-                remote_available = False
-                
-                try:
-                    # Connect to local database
-                    local_conn = mysql.connector.connect(
-                        host="localhost",
-                        user="root",
-                        password="",
-                        database="offta"
-                    )
-                    local_cursor = local_conn.cursor()
-                    
-                    # Get all tables from local database
-                    local_cursor.execute("SHOW TABLES")
-                    local_tables = {row[0] for row in local_cursor.fetchall()}
-                    log_to_file(f"[Sync] Found {len(local_tables)} tables in local database")
-                    
-                    # Connect to remote database
-                    remote_tables = set()
-                    try:
-                        remote_conn = mysql.connector.connect(
-                            host="172.104.206.182",
-                            port=3306,
-                            user="seattlelisted_usr",
-                            password="T@5z6^pl}",
-                            database="offta",
-                            connect_timeout=30,
-                            connection_timeout=30
-                        )
-                        remote_cursor = remote_conn.cursor()
-                        remote_available = True
-                        
-                        # Get all tables from remote database
-                        remote_cursor.execute("SHOW TABLES")
-                        remote_tables = {row[0] for row in remote_cursor.fetchall()}
-                        log_to_file(f"[Sync] Found {len(remote_tables)} tables in remote database")
-                        log_to_file("[Sync] ✓ Connected to remote database for comparison")
-                    except Exception as remote_err:
-                        log_to_file(f"[Sync] ⚠️ Cannot connect to remote database: {remote_err}")
-                        remote_available = False
-                    
-                    # Get union of all tables from both databases
-                    all_tables = sorted(local_tables | remote_tables)
-                    log_to_file(f"[Sync] Total unique tables: {len(all_tables)}")
-                    
-                    progress_bar['value'] = 60
-                    status_label.config(text="📊 Comparing databases...")
-                    detail_label.config(text=f"Analyzing {len(all_tables)} tables...", fg="#3498DB")
-                    progress_label.config(text=f"Step 3 of 3: Comparing {len(all_tables)} tables...")
-                    preloader.update()
-                    
-                    # Collect row counts
-                    for table in all_tables:
-                        try:
-                            # Get local count (if table exists locally)
-                            if table in local_tables:
-                                local_cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
-                                local_count = local_cursor.fetchone()[0]
-                            else:
-                                local_count = 0
-                            
-                            # Get remote count if available
-                            if remote_available:
-                                try:
-                                    if table in remote_tables:
-                                        remote_cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
-                                        remote_count = remote_cursor.fetchone()[0]
-                                    else:
-                                        remote_count = 0  # Table doesn't exist yet
-                                        log_to_file(f"[Sync] Table {table} doesn't exist on remote (will be created)")
-                                except Exception as table_err:
-                                    log_to_file(f"[Sync] Warning: Could not get remote count for {table}: {table_err}")
-                                    remote_count = '?'
-                            else:
-                                remote_count = '?'
-                            
-                            if isinstance(remote_count, int) and isinstance(local_count, int):
-                                diff = local_count - remote_count
-                            else:
-                                diff = '?'
-                            
-                            table_diffs.append({
-                                'table': table,
-                                'local': local_count,
-                                'remote': remote_count,
-                                'diff': diff
-                            })
-                        except Exception as table_err:
-                            log_to_file(f"[Sync] Warning: Could not compare {table}: {table_err}")
-                            table_diffs.append({
-                                'table': table,
-                                'local': '?',
-                                'remote': '?',
-                                'diff': '?'
-                            })
-                    
-                    local_cursor.close()
-                    local_conn.close()
-                    if remote_available:
-                        remote_cursor.close()
-                        remote_conn.close()
-                    
-                    log_to_file("[Sync] Database comparison complete")
-                    
-                    # Close preloader
-                    progress_bar['value'] = 100
-                    status_label.config(text="✓ Analysis complete!")
-                    detail_label.config(text=f"Found {len(table_diffs)} tables", fg="#2ECC71")
-                    progress_label.config(text="Complete! Opening comparison window...", fg="#2ECC71")
-                    preloader.update()
-                    root.after(500)  # Brief pause to show success
-                    preloader.destroy()
-                    
-                except Exception as compare_err:
-                    preloader.destroy()
-                    log_to_file(f"[Sync] ✗ Failed to compare databases: {compare_err}")
-                    messagebox.showerror(
-                        "Sync Failed",
-                        f"Failed to access local database:\n\n{compare_err}",
-                        parent=root
-                    )
-                    return
-                
-                # Step 3: Create inline sync status window
-                compare_win = tk.Toplevel(root)
-                compare_win.title("Database Sync Control")
-                compare_win.geometry("800x600")
-                compare_win.transient(root)
-                compare_win.resizable(True, True)
-                
-                # Header
-                header_frame = tk.Frame(compare_win, bg="#2C3E50", pady=10)
-                header_frame.pack(fill="x")
-                
-                tk.Label(
-                    header_frame,
-                    text="� Database Sync Control",
-                    font=("Segoe UI", 14, "bold"),
-                    bg="#2C3E50",
-                    fg="white"
-                ).pack()
-                
-                # Stats summary
-                total_local = sum(d['local'] for d in table_diffs if isinstance(d['local'], int))
-                total_remote = sum(d['remote'] for d in table_diffs if isinstance(d['remote'], int))
-                
-                tk.Label(
-                    header_frame,
-                    text=f"{len(table_diffs)} tables  •  {total_local:,} local rows  •  {total_remote:,} remote rows",
-                    font=("Segoe UI", 9),
-                    bg="#2C3E50",
-                    fg="#ECF0F1"
-                ).pack()
-                
-                # Button frame
-                button_frame = tk.Frame(compare_win, bg="white", pady=15)
-                button_frame.pack(fill="x", padx=20, pady=(15, 10))
-                
-                # Status label and progress bar
-                status_label = tk.Label(
-                    compare_win,
-                    text="Ready to sync",
-                    font=("Segoe UI", 10),
-                    bg="white",
-                    fg="#7F8C8D"
-                )
-                status_label.pack(pady=(0, 5))
-                
-                progress_bar = ttk.Progressbar(compare_win, mode='indeterminate', length=450)
-                progress_bar.pack(pady=5)
-                progress_bar.pack_forget()  # Hide initially
-                
-                # Create notebook for tabs
-                notebook = ttk.Notebook(compare_win)
-                notebook.pack(fill="both", expand=True, padx=10, pady=10)
-                
-                # Tab 1: Tables view
-                tables_tab = tk.Frame(notebook, bg="white")
-                notebook.add(tables_tab, text="📊 Tables")
-                
-                # Create canvas for scrollable table
-                canvas = tk.Canvas(tables_tab, bg="white")
-                scrollbar = ttk.Scrollbar(tables_tab, orient="vertical", command=canvas.yview)
-                scrollable_frame = tk.Frame(canvas, bg="white")
-                
-                scrollable_frame.bind(
-                    "<Configure>",
-                    lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-                )
-                
-                canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-                canvas.configure(yscrollcommand=scrollbar.set)
-                
-                # Header row
-                header_frame = tk.Frame(scrollable_frame, bg="#34495E", relief="flat")
-                header_frame.pack(fill="x", pady=(0, 2))
-                
-                tk.Label(header_frame, text="Table Name", bg="#34495E", fg="white", 
-                        font=("Segoe UI", 9, "bold"), width=20, anchor="w").pack(side="left", padx=5, pady=5)
-                tk.Label(header_frame, text="Local Rows", bg="#34495E", fg="white",
-                        font=("Segoe UI", 9, "bold"), width=10, anchor="center").pack(side="left", padx=5, pady=5)
-                tk.Label(header_frame, text="Remote Rows", bg="#34495E", fg="white",
-                        font=("Segoe UI", 9, "bold"), width=10, anchor="center").pack(side="left", padx=5, pady=5)
-                tk.Label(header_frame, text="Difference", bg="#34495E", fg="white",
-                        font=("Segoe UI", 9, "bold"), width=15, anchor="center").pack(side="left", padx=5, pady=5)
-                tk.Label(header_frame, text="Actions", bg="#34495E", fg="white",
-                        font=("Segoe UI", 9, "bold"), width=10, anchor="center").pack(side="left", padx=5, pady=5)
-                
-                # Function to get tables with their foreign key dependencies
-                def get_table_dependencies(table_name, source_host, source_user, source_pass):
-                    """Get list of tables that need to be synced (table + its dependencies)"""
-                    try:
-                        dep_conn = mysql.connector.connect(
-                            host=source_host,
-                            port=3306,
-                            user=source_user,
-                            password=source_pass if source_pass else "",
-                            database="offta",
-                            connection_timeout=30
-                        )
-                        dep_cursor = dep_conn.cursor()
-                        
-                        # Get foreign key dependencies
-                        dep_cursor.execute(f"""
-                            SELECT DISTINCT REFERENCED_TABLE_NAME
-                            FROM information_schema.KEY_COLUMN_USAGE
-                            WHERE TABLE_SCHEMA = 'offta'
-                            AND TABLE_NAME = '{table_name}'
-                            AND REFERENCED_TABLE_NAME IS NOT NULL
-                        """)
-                        
-                        dependencies = [row[0] for row in dep_cursor.fetchall()]
-                        
-                        # Add apartment_listing_price_changes when syncing apartment_listings
-                        if table_name == 'apartment_listings':
-                            if 'apartment_listing_price_changes' not in dependencies:
-                                dependencies.append('apartment_listing_price_changes')
-                                log_to_file(f"[Sync] Added apartment_listing_price_changes as dependency of apartment_listings")
-                        
-                        dep_cursor.close()
-                        dep_conn.close()
-                        
-                        # Return dependencies first, then the table itself
-                        return dependencies + [table_name]
-                    except:
-                        # If we can't get dependencies, just return the table
-                        # Still add price_changes for apartment_listings
-                        if table_name == 'apartment_listings':
-                            return ['apartment_listing_price_changes', table_name]
-                        return [table_name]
-                
-                # Function to sync single table
-                def sync_single_table(table_name, direction):
-                    """Sync a single table (and its dependencies)"""
-                    is_local_to_remote = (direction == "local_to_remote")
-                    direction_text = "Local → Remote" if is_local_to_remote else "Remote → Local"
-                    
-                    # Switch to log tab
-                    notebook.select(1)
-                    log_status(f"\n{'='*60}", "info")
-                    log_status(f"Syncing table '{table_name}' ({direction_text})...", "info")
-                    status_label.config(text=f"Syncing {table_name}...", fg="#3498DB")
-                    progress_bar.pack(pady=5)
-                    progress_bar.start(10)
-                    compare_win.update()
-                    
-                    temp_dir = tempfile.mkdtemp()
-                    dump_file = os.path.join(temp_dir, f"sync_{table_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql")
-                    
-                    try:
-                        # Configure source and destination
-                        if is_local_to_remote:
-                            source_host, source_user, source_pass = "localhost", "root", ""
-                            dest_host, dest_user, dest_pass = "172.104.206.182", "seattlelisted_usr", "T@5z6^pl}"
-                        else:
-                            source_host, source_user, source_pass = "172.104.206.182", "seattlelisted_usr", "T@5z6^pl}"
-                            dest_host, dest_user, dest_pass = "localhost", "root", ""
-                        
-                        # Get table dependencies
-                        tables_to_sync = get_table_dependencies(table_name, source_host, source_user, source_pass)
-                        
-                        if len(tables_to_sync) > 1:
-                            log_status(f"Dependencies detected: {', '.join(tables_to_sync[:-1])}", "info")
-                            log_status(f"Will sync {len(tables_to_sync)} tables together", "info")
-                        
-                        # Dump table(s)
-                        log_status(f"Dumping from {source_host}...", "info")
-                        dump_cmd = [mysqldump_path, "-h", source_host, "-u", source_user]
-                        if source_pass:
-                            dump_cmd.append(f"-p{source_pass}")
-                        dump_cmd.extend(["--databases", "offta", "--tables"] + tables_to_sync + 
-                                       ["--single-transaction", "--quick", "--lock-tables=false",
-                                        "--complete-insert"])
-                        
-                        with open(dump_file, "w", encoding="utf-8") as f:
-                            result = subprocess.run(dump_cmd, stdout=f, stderr=subprocess.PIPE, text=True)
-                        
-                        if result.returncode != 0:
-                            raise Exception(f"mysqldump failed: {result.stderr}")
-                        
-                        log_status(f"✓ Dump complete ({os.path.getsize(dump_file):,} bytes)", "ok")
-                        
-                        # Import table using Python mysql.connector (to avoid auth plugin issues)
-                        log_status(f"Importing to {dest_host}...", "info")
-                        
-                        import_conn = mysql.connector.connect(
-                            host=dest_host,
-                            port=3306,
-                            user=dest_user,
-                            password=dest_pass if dest_pass else "",
-                            database="offta",
-                            connection_timeout=60
-                        )
-                        import_cursor = import_conn.cursor()
-                        
-                        # Disable foreign key checks to allow dropping tables with dependencies
-                        import_cursor.execute("SET FOREIGN_KEY_CHECKS=0")
-                        
-                        # Drop existing tables to ensure clean sync (in reverse order)
-                        for tbl in reversed(tables_to_sync):
-                            try:
-                                import_cursor.execute(f"DROP TABLE IF EXISTS `{tbl}`")
-                                log_status(f"Dropped existing table '{tbl}'", "info")
-                            except:
-                                pass
-                        
-                        # Read and execute SQL dump (use latin1 to handle binary data in BLOBs)
-                        with open(dump_file, "r", encoding="latin1") as f:
-                            sql_content = f.read()
-                        
-                        # Fix generated column issues - MySQL auto-calculates these
-                        # 1. apartment_listings_price_changes: 'date' column
-                        sql_content = sql_content.replace(
-                            "INSERT INTO `apartment_listings_price_changes` (`id`, `apartment_listings_id`, `new_price`, `time`, `date`)",
-                            "INSERT INTO `apartment_listings_price_changes` (`id`, `apartment_listings_id`, `new_price`, `time`)"
-                        )
-                        sql_content = re.sub(r",'(\d{4}-\d{2}-\d{2})'\)", r")", sql_content)
-                        
-                        # 2. queue_websites: 'hash_key' is GENERATED column - remove from CREATE TABLE and INSERT
-                        # Remove the entire hash_key column definition from CREATE TABLE
-                        sql_content = re.sub(
-                            r",\s*`hash_key`[^,]*GENERATED[^,]*STORED",
-                            "",
-                            sql_content,
-                            flags=re.IGNORECASE
-                        )
-                        # Also remove unique key constraint on hash_key
-                        sql_content = re.sub(
-                            r",\s*UNIQUE KEY `uq_queue_hash` \(`hash_key`\)",
-                            "",
-                            sql_content
-                        )
-                        # Remove hash_key from INSERT column list (appears after `processed_at`)
-                        before_col_fix = sql_content
-                        sql_content = re.sub(
-                            r"(`processed_at`),\s*`hash_key`",
-                            r"\1",
-                            sql_content
-                        )
-                        if before_col_fix != sql_content:
-                            log_status("→ Removed hash_key from INSERT column list", "info")
-                        
-                        # Remove hash_key value from VALUES - it's the 15th value (binary string between processed_at and run_interval_minutes)
-                        # The value appears as: '2025-11-08 18:32:22','[binary_data]',4320
-                        # We need to remove: ,'[binary_data]'
-                        before_val_fix = sql_content
-                        sql_content = re.sub(
-                            r"(\`processed_at\`\) VALUES \([^)]*'[\d\-: ]+')\s*,\s*'[^']*'\s*,(\s*\d+\s*,)",
-                            r"\1,\2",
-                            sql_content
-                        )
-                        if before_val_fix != sql_content:
-                            log_status("→ Removed hash_key from INSERT VALUES", "info")
-                        
-                        # Count statement types
-                        create_count = sql_content.upper().count('CREATE TABLE')
-                        insert_count = sql_content.upper().count('INSERT INTO')
-                        
-                        # Check if dump actually has data
-                        if insert_count == 0:
-                            log_status(f"⚠ WARNING: Dump has no INSERT statements! Source table may be empty.", "warn")
-                        
-                        log_status(f"Dump contains: {create_count} CREATE, {insert_count} INSERT statements", "info")
-                        
-                        # Import using Python mysql.connector (avoids auth plugin issues with mysql.exe)
-                        log_status(f"Importing SQL statements...", "info")
-                        
-                        # Execute statements
-                        import_cursor.execute("SET FOREIGN_KEY_CHECKS=0")
-                        import_cursor.execute("SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO'")
-                        
-                        # Split by semicolons that are followed by newline (actual statement terminators)
-                        # This handles multi-line INSERT statements properly
-                        statements = re.split(r';\s*\n', sql_content)
-                        
-                        executed = 0
-                        inserts_executed = 0
-                        failed_inserts = 0
-                        for stmt in statements:
-                            stmt = stmt.strip()
-                            if not stmt or stmt.startswith('--') or stmt.startswith('/*'):
-                                continue
-                            
-                            # Skip SET and USE statements from mysqldump
-                            stmt_upper = stmt.upper()
-                            if stmt_upper.startswith('USE ') or stmt_upper.startswith('SET '):
-                                continue
-                            
-                            is_insert = 'INSERT INTO' in stmt_upper
-                            try:
-                                import_cursor.execute(stmt)
-                                executed += 1
-                                if is_insert:
-                                    inserts_executed += 1
-                                    # Log which table was inserted
-                                    match = re.search(r'INSERT INTO [`\"]?(\w+)', stmt_upper)
-                                    if match:
-                                        log_status(f"  → Inserted data into {match.group(1)}", "info")
-                            except Exception as e:
-                                error_msg = str(e)
-                                # Check if it's an INSERT that failed
-                                if is_insert:
-                                    failed_inserts += 1
-                                    log_status(f"⚠ INSERT failed: {error_msg}", "warn")
-                                    # Show preview of failed statement
-                                    preview = stmt[:300].replace('\n', ' ')
-                                    log_status(f"  Statement: {preview}...", "warn")
-                                elif 'generated column' not in error_msg.lower():
-                                    log_status(f"⚠ Error: {error_msg[:150]}", "warn")
-                        
-                        import_cursor.execute("SET FOREIGN_KEY_CHECKS=1")
-                        import_conn.commit()
-                        import_cursor.close()
-                        import_conn.close()
-                        
-                        if failed_inserts > 0:
-                            log_status(f"⚠ {failed_inserts} INSERT statements failed!", "warn")
-                        
-                        log_status(f"✓ Executed {executed} statements ({inserts_executed} successful inserts)", "info")
-                        
-                        # Verify import by counting rows for each synced table
-                        verify_conn = mysql.connector.connect(
-                            host=dest_host,
-                            port=3306,
-                            user=dest_user,
-                            password=dest_pass if dest_pass else "",
-                            database="offta",
-                            connection_timeout=30
-                        )
-                        verify_cursor = verify_conn.cursor()
-                        
-                        # Check all synced tables
-                        for tbl in tables_to_sync:
-                            verify_cursor.execute(f"SELECT COUNT(*) FROM `{tbl}`")
-                            tbl_count = verify_cursor.fetchone()[0]
-                            log_status(f"  '{tbl}': {tbl_count:,} rows", "info")
-                        
-                        verify_cursor.execute(f"SELECT COUNT(*) FROM `{table_name}`")
-                        row_count = verify_cursor.fetchone()[0]
-                        verify_cursor.close()
-                        verify_conn.close()
-                        log_status(f"✓ Verified: '{table_name}' now has {row_count:,} rows", "ok")
-                        
-                        # Only report success if INSERTs actually succeeded
-                        if failed_inserts > 0:
-                            log_status(f"✗ Sync completed with {failed_inserts} failures", "err")
-                            status_label.config(text=f"✗ {table_name} sync failed", fg="#E74C3C")
-                            log_to_file(f"[Sync] ✗ Failed to sync table '{table_name}' {direction_text} - {failed_inserts} INSERT failures")
-                        elif len(tables_to_sync) > 1:
-                            log_status(f"✓ Synced {len(tables_to_sync)} tables: {', '.join(tables_to_sync)}", "ok")
-                            status_label.config(text=f"✓ {table_name} synced", fg="#27AE60")
-                            log_to_file(f"[Sync] ✓ Synced table '{table_name}' {direction_text}")
-                        else:
-                            log_status(f"✓ Table '{table_name}' synced successfully!", "ok")
-                            status_label.config(text=f"✓ {table_name} synced", fg="#27AE60")
-                            log_to_file(f"[Sync] ✓ Synced table '{table_name}' {direction_text}")
-                        
-                    except Exception as e:
-                        error_msg = str(e)
-                        if "caching_sha2_password" in error_msg:
-                            error_msg = "Authentication plugin error"
-                        log_status(f"✗ Failed: {error_msg}", "err")
-                        status_label.config(text=f"✗ Sync failed", fg="#E74C3C")
-                        log_to_file(f"[Sync] ✗ Failed to sync '{table_name}': {e}")
-                    finally:
-                        progress_bar.stop()
-                        progress_bar.pack_forget()
-                        try:
-                            if os.path.exists(dump_file):
-                                os.remove(dump_file)
-                            os.rmdir(temp_dir)
-                        except:
-                            pass
-                
-                # Data rows
-                for idx, diff_data in enumerate(table_diffs):
-                    table_name = diff_data['table']
-                    local_val = diff_data['local']
-                    remote_val = diff_data['remote']
-                    diff_val = diff_data['diff']
-                    
-                    # Format display strings
-                    local_display = f"{local_val:,}" if isinstance(local_val, int) else str(local_val)
-                    remote_display = f"{remote_val:,}" if isinstance(remote_val, int) else str(remote_val)
-                    
-                    if diff_val == '?':
-                        diff_str = "?"
-                        diff_color = "#95A5A6"
-                    elif diff_val == 0:
-                        diff_str = "No change"
-                        diff_color = "#95A5A6"
-                    elif diff_val > 0:
-                        diff_str = f"+{diff_val:,}"
-                        diff_color = "#27AE60"
-                    else:
-                        diff_str = f"{diff_val:,}"
-                        diff_color = "#E74C3C"
-                    
-                    # Alternate row colors
-                    row_bg = "#ECF0F1" if idx % 2 == 0 else "white"
-                    
-                    row_frame = tk.Frame(scrollable_frame, bg=row_bg, relief="flat")
-                    row_frame.pack(fill="x", pady=1)
-                    
-                    tk.Label(row_frame, text=table_name, bg=row_bg, fg="#2C3E50",
-                            font=("Segoe UI", 9), width=20, anchor="w").pack(side="left", padx=5, pady=3)
-                    tk.Label(row_frame, text=local_display, 
-                            bg=row_bg, fg="#2C3E50", font=("Segoe UI", 9), width=10, anchor="center").pack(side="left", padx=5, pady=3)
-                    tk.Label(row_frame, text=remote_display, 
-                            bg=row_bg, fg="#2C3E50", font=("Segoe UI", 9), width=10, anchor="center").pack(side="left", padx=5, pady=3)
-                    tk.Label(row_frame, text=diff_str, bg=row_bg, fg=diff_color,
-                            font=("Segoe UI", 9, "bold"), width=15, anchor="center").pack(side="left", padx=5, pady=3)
-                    
-                    # Action buttons
-                    btn_frame = tk.Frame(row_frame, bg=row_bg)
-                    btn_frame.pack(side="left", padx=5)
-                    
-                    # Only show L→R button if table exists locally
-                    if isinstance(local_val, int) and local_val > 0:
-                        tk.Button(btn_frame, text="⬆️", bg="#27AE60", fg="white",
-                                font=("Segoe UI", 8, "bold"), width=3, cursor="hand2",
-                                command=lambda t=table_name: sync_single_table(t, "local_to_remote")
-                        ).pack(side="left", padx=2)
-                    else:
-                        tk.Label(btn_frame, text="  ", bg=row_bg, width=3).pack(side="left", padx=2)
-                    
-                    # Only show R→L button if table exists remotely
-                    if isinstance(remote_val, int) and remote_val > 0:
-                        tk.Button(btn_frame, text="⬇️", bg="#3498DB", fg="white",
-                                font=("Segoe UI", 8, "bold"), width=3, cursor="hand2",
-                                command=lambda t=table_name: sync_single_table(t, "remote_to_local")
-                        ).pack(side="left", padx=2)
-                    else:
-                        tk.Label(btn_frame, text="  ", bg=row_bg, width=3).pack(side="left", padx=2)
-                
-                canvas.pack(side="left", fill="both", expand=True)
-                scrollbar.pack(side="right", fill="y")
-                
-                # Tab 2: Sync Log
-                log_tab = tk.Frame(notebook, bg="white")
-                notebook.add(log_tab, text="📋 Sync Log")
-                
-                log_text = tk.Text(
-                    log_tab,
-                    bg="#F8F9FA",
-                    fg="#2C3E50",
-                    font=("Consolas", 9),
-                    relief="flat",
-                    wrap="word"
-                )
-                log_scrollbar = ttk.Scrollbar(log_tab, orient="vertical", command=log_text.yview)
-                log_text.configure(yscrollcommand=log_scrollbar.set)
-                log_text.pack(side="left", fill="both", expand=True)
-                log_scrollbar.pack(side="right", fill="y")
-                
-                def log_status(message, level="info"):
-                    """Add message to status log"""
-                    colors = {"info": "#2C3E50", "ok": "#27AE60", "err": "#E74C3C", "warn": "#E67E22"}
-                    log_text.insert("end", f"{message}\n", level)
-                    log_text.tag_config(level, foreground=colors.get(level, "#2C3E50"))
-                    log_text.see("end")
-                    compare_win.update()
-                
-                # Tab 3: Expenses - Track API usage
-                expenses_tab = tk.Frame(notebook, bg="white")
-                notebook.add(expenses_tab, text="💰 Expenses")
-                
-                # Create expenses display
-                expenses_canvas = tk.Canvas(expenses_tab, bg="white")
-                expenses_scrollbar = ttk.Scrollbar(expenses_tab, orient="vertical", command=expenses_canvas.yview)
-                expenses_scrollable = tk.Frame(expenses_canvas, bg="white")
-                
-                expenses_scrollable.bind(
-                    "<Configure>",
-                    lambda e: expenses_canvas.configure(scrollregion=expenses_canvas.bbox("all"))
-                )
-                
-                expenses_canvas.create_window((0, 0), window=expenses_scrollable, anchor="nw")
-                expenses_canvas.configure(yscrollcommand=expenses_scrollbar.set)
-                
-                # Summary section
-                summary_frame = tk.Frame(expenses_scrollable, bg="#ECF0F1", relief="ridge", bd=2)
-                summary_frame.pack(fill="x", padx=10, pady=10)
-                
-                tk.Label(summary_frame, text="API Usage Summary", bg="#ECF0F1", fg="#2C3E50",
-                        font=("Segoe UI", 11, "bold")).pack(pady=(10, 5))
-                
-                # Pricing constants (as of 2025)
-                OPENAI_PRICING = {
-                    "gpt-4-vision-preview": {"input": 0.01 / 1000, "output": 0.03 / 1000},  # per token
-                    "gpt-4": {"input": 0.03 / 1000, "output": 0.06 / 1000},
-                    "gpt-3.5-turbo": {"input": 0.0005 / 1000, "output": 0.0015 / 1000},
-                }
-                GOOGLE_PRICING = {
-                    "places_details": 0.017,  # per call
-                    "geocoding": 0.005,  # per call
-                    "places_search": 0.032,  # per call
-                }
-                
-                # Stats labels
-                stats_container = tk.Frame(summary_frame, bg="#ECF0F1")
-                stats_container.pack(pady=5, padx=20)
-                
-                openai_stats_label = tk.Label(stats_container, text="OpenAI: Loading...", bg="#ECF0F1", fg="#2C3E50",
-                                             font=("Segoe UI", 10), anchor="w")
-                openai_stats_label.grid(row=0, column=0, sticky="w", padx=10, pady=3)
-                
-                google_stats_label = tk.Label(stats_container, text="Google: Loading...", bg="#ECF0F1", fg="#2C3E50",
-                                             font=("Segoe UI", 10), anchor="w")
-                google_stats_label.grid(row=1, column=0, sticky="w", padx=10, pady=3)
-                
-                total_stats_label = tk.Label(stats_container, text="Total: Loading...", bg="#ECF0F1", fg="#27AE60",
-                                            font=("Segoe UI", 11, "bold"), anchor="w")
-                total_stats_label.grid(row=2, column=0, sticky="w", padx=10, pady=(10, 5))
-                
-                # Detailed logs section
-                details_frame = tk.Frame(expenses_scrollable, bg="white")
-                details_frame.pack(fill="both", expand=True, padx=10, pady=5)
-                
-                tk.Label(details_frame, text="Recent API Calls", bg="white", fg="#2C3E50",
-                        font=("Segoe UI", 10, "bold")).pack(pady=5)
-                
-                # Header for API calls table
-                header_frame = tk.Frame(details_frame, bg="#34495E", relief="flat")
-                header_frame.pack(fill="x", pady=(0, 2))
-                
-                tk.Label(header_frame, text="Date/Time", bg="#34495E", fg="white",
-                        font=("Segoe UI", 9, "bold"), width=20, anchor="w").pack(side="left", padx=5, pady=5)
-                tk.Label(header_frame, text="Service", bg="#34495E", fg="white",
-                        font=("Segoe UI", 9, "bold"), width=12, anchor="w").pack(side="left", padx=5, pady=5)
-                tk.Label(header_frame, text="Endpoint", bg="#34495E", fg="white",
-                        font=("Segoe UI", 9, "bold"), width=20, anchor="w").pack(side="left", padx=5, pady=5)
-                tk.Label(header_frame, text="Tokens/Calls", bg="#34495E", fg="white",
-                        font=("Segoe UI", 9, "bold"), width=12, anchor="center").pack(side="left", padx=5, pady=5)
-                tk.Label(header_frame, text="Cost", bg="#34495E", fg="white",
-                        font=("Segoe UI", 9, "bold"), width=10, anchor="e").pack(side="left", padx=5, pady=5)
-                
-                # Scrollable API calls list
-                calls_list_frame = tk.Frame(details_frame, bg="white")
-                calls_list_frame.pack(fill="both", expand=True)
-                
-                def load_expenses_data():
-                    """Load and display API usage data from database"""
-                    try:
-                        # Connect to database
-                        conn = mysql.connector.connect(
-                            host="localhost",
-                            user="root",
-                            password="",
-                            database="offta"
-                        )
-                        cursor = conn.cursor(dictionary=True)
-                        
-                        # Ensure api_calls table exists
-                        cursor.execute("""
-                            CREATE TABLE IF NOT EXISTS api_calls (
-                                id INT AUTO_INCREMENT PRIMARY KEY,
-                                service VARCHAR(50) NOT NULL,
-                                endpoint VARCHAR(100) NOT NULL,
-                                call_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                tokens_used INT DEFAULT 0,
-                                calls_count INT DEFAULT 1,
-                                input_tokens INT DEFAULT 0,
-                                output_tokens INT DEFAULT 0,
-                                model VARCHAR(50),
-                                cost_usd DECIMAL(10, 6) DEFAULT 0,
-                                metadata TEXT,
-                                INDEX idx_service (service),
-                                INDEX idx_call_time (call_time)
-                            )
-                        """)
-                        conn.commit()
-                        
-                        # Get summary stats
-                        cursor.execute("""
-                            SELECT 
-                                service,
-                                COUNT(*) as total_calls,
-                                SUM(tokens_used) as total_tokens,
-                                SUM(calls_count) as api_calls,
-                                SUM(cost_usd) as total_cost
-                            FROM api_calls
-                            GROUP BY service
-                        """)
-                        
-                        summary_data = cursor.fetchall()
-                        
-                        openai_cost = 0
-                        openai_calls = 0
-                        google_cost = 0
-                        google_calls = 0
-                        
-                        for row in summary_data:
-                            if row['service'] == 'openai':
-                                openai_cost = float(row['total_cost'] or 0)
-                                openai_calls = int(row['total_calls'] or 0)
-                            elif row['service'] == 'google':
-                                google_cost = float(row['total_cost'] or 0)
-                                google_calls = int(row['api_calls'] or 0)
-                        
-                        total_cost = openai_cost + google_cost
-                        
-                        # Update summary labels
-                        openai_stats_label.config(
-                            text=f"OpenAI API: {openai_calls:,} calls | ${openai_cost:.4f} USD"
-                        )
-                        google_stats_label.config(
-                            text=f"Google API: {google_calls:,} calls | ${google_cost:.4f} USD"
-                        )
-                        total_stats_label.config(
-                            text=f"Total Cost: ${total_cost:.4f} USD"
-                        )
-                        
-                        # Get recent API calls (last 100)
-                        cursor.execute("""
-                            SELECT 
-                                service,
-                                endpoint,
-                                call_time,
-                                tokens_used,
-                                calls_count,
-                                cost_usd,
-                                model
-                            FROM api_calls
-                            ORDER BY call_time DESC
-                            LIMIT 100
-                        """)
-                        
-                        recent_calls = cursor.fetchall()
-                        
-                        # Clear existing calls list
-                        for widget in calls_list_frame.winfo_children():
-                            widget.destroy()
-                        
-                        # Display recent calls
-                        if recent_calls:
-                            for idx, call in enumerate(recent_calls):
-                                row_bg = "#F8F9FA" if idx % 2 == 0 else "white"
-                                
-                                call_frame = tk.Frame(calls_list_frame, bg=row_bg, relief="flat")
-                                call_frame.pack(fill="x", pady=1)
-                                
-                                # Format timestamp
-                                call_time = call['call_time'].strftime("%Y-%m-%d %H:%M:%S")
-                                
-                                tk.Label(call_frame, text=call_time, bg=row_bg, fg="#2C3E50",
-                                        font=("Segoe UI", 8), width=20, anchor="w").pack(side="left", padx=5, pady=2)
-                                
-                                service_color = "#E67E22" if call['service'] == 'openai' else "#3498DB"
-                                tk.Label(call_frame, text=call['service'].upper(), bg=row_bg, fg=service_color,
-                                        font=("Segoe UI", 8, "bold"), width=12, anchor="w").pack(side="left", padx=5, pady=2)
-                                
-                                endpoint_text = call['endpoint'][:25] + "..." if len(call['endpoint']) > 25 else call['endpoint']
-                                tk.Label(call_frame, text=endpoint_text, bg=row_bg, fg="#2C3E50",
-                                        font=("Segoe UI", 8), width=20, anchor="w").pack(side="left", padx=5, pady=2)
-                                
-                                # Show tokens for OpenAI, calls count for Google
-                                usage_text = f"{call['tokens_used']:,} tokens" if call['service'] == 'openai' else f"{call['calls_count']} calls"
-                                tk.Label(call_frame, text=usage_text, bg=row_bg, fg="#7F8C8D",
-                                        font=("Segoe UI", 8), width=12, anchor="center").pack(side="left", padx=5, pady=2)
-                                
-                                cost_color = "#27AE60" if call['cost_usd'] < 0.01 else "#E67E22"
-                                tk.Label(call_frame, text=f"${float(call['cost_usd']):.4f}", bg=row_bg, fg=cost_color,
-                                        font=("Segoe UI", 8, "bold"), width=10, anchor="e").pack(side="left", padx=5, pady=2)
-                        else:
-                            tk.Label(calls_list_frame, text="No API calls recorded yet", bg="white", fg="#95A5A6",
-                                    font=("Segoe UI", 10, "italic")).pack(pady=20)
-                        
-                        cursor.close()
-                        conn.close()
-                        
-                    except Exception as e:
-                        openai_stats_label.config(text=f"Error loading data: {str(e)}")
-                        log_to_file(f"[Expenses] Error loading API data: {e}")
-                
-                expenses_canvas.pack(side="left", fill="both", expand=True)
-                expenses_scrollbar.pack(side="right", fill="y")
-                
-                # Refresh button
-                refresh_btn_frame = tk.Frame(expenses_scrollable, bg="white")
-                refresh_btn_frame.pack(pady=10)
-                
-                tk.Button(refresh_btn_frame, text="🔄 Refresh Data", bg="#3498DB", fg="white",
-                         font=("Segoe UI", 9, "bold"), padx=15, pady=5, cursor="hand2",
-                         command=load_expenses_data).pack()
-                
-                # Load initial data
-                load_expenses_data()
-                
-                # Log initial info
-                log_status(f"Database comparison complete", "info")
-                log_status(f"Found {len(table_diffs)} tables", "info")
-                tables_with_diff = [d for d in table_diffs if d['diff'] != 0 and d['diff'] != '?']
-                if tables_with_diff:
-                    log_status(f"{len(tables_with_diff)} tables have differences", "warn")
-                    for d in tables_with_diff[:5]:  # Show first 5
-                        diff_val = d['diff']
-                        if diff_val > 0:
-                            log_status(f"  {d['table']}: +{diff_val:,} rows", "ok")
-                        else:
-                            log_status(f"  {d['table']}: {diff_val:,} rows", "err")
-                    if len(tables_with_diff) > 5:
-                        log_status(f"  ... and {len(tables_with_diff) - 5} more", "info")
-                else:
-                    log_status("All tables are synchronized", "ok")
-                
-                # Sync functions that update status
-                syncing = [False]  # Track if sync in progress
-                
-                def perform_sync(direction):
-                    """Perform the actual sync with status updates"""
-                    if syncing[0]:
-                        return
-                    
-                    syncing[0] = True
-                    is_local_to_remote = (direction == "local_to_remote")
-                    direction_text = "Local → Remote" if is_local_to_remote else "Remote → Local"
-                    
-                    # Switch to log tab and update UI
-                    notebook.select(1)  # Switch to log tab (index 1)
-                    status_label.config(text=f"Syncing ({direction_text})...", fg="#3498DB")
-                    progress_bar.pack(pady=5)
-                    progress_bar.start(10)
-                    compare_win.update()
-                    
-                    # Create temp directory for SQL dump
-                    temp_dir = tempfile.mkdtemp()
-                    dump_file = os.path.join(temp_dir, f"sync_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql")
-                    
-                    try:
-                        log_status(f"\n{'='*60}", "info")
-                        log_status(f"Starting {direction_text} sync...", "info")
-                        
-                        # Configure source and destination
-                        if is_local_to_remote:
-                            source_host, source_user, source_pass = "localhost", "root", ""
-                            dest_host, dest_user, dest_pass = "172.104.206.182", "seattlelisted_usr", "T@5z6^pl}"
-                            tables_to_sync = [d['table'] for d in table_diffs if isinstance(d['local'], int) and d['local'] > 0]
-                        else:
-                            source_host, source_user, source_pass = "172.104.206.182", "seattlelisted_usr", "T@5z6^pl}"
-                            dest_host, dest_user, dest_pass = "localhost", "root", ""
-                            tables_to_sync = [d['table'] for d in table_diffs if isinstance(d['remote'], int) and d['remote'] > 0]
-                        
-                        log_status(f"Dumping {len(tables_to_sync)} tables from {source_host}...", "info")
-                        status_label.config(text=f"Dumping {len(tables_to_sync)} tables...")
-                        compare_win.update()
-                        
-                        # Build dump command
-                        dump_cmd = [mysqldump_path, "-h", source_host, "-u", source_user]
-                        if source_pass:
-                            dump_cmd.append(f"-p{source_pass}")
-                        dump_cmd.extend(["--databases", "offta", "--tables"] + tables_to_sync + 
-                                      ["--single-transaction", "--quick", "--lock-tables=false",
-                                       "--complete-insert", "--add-drop-table"])
-                        
-                        with open(dump_file, "w", encoding="utf-8") as f:
-                            result = subprocess.run(dump_cmd, stdout=f, stderr=subprocess.PIPE, text=True)
-                        
-                        if result.returncode != 0:
-                            raise Exception(f"mysqldump failed: {result.stderr}")
-                        
-                        log_status(f"✓ Dump complete ({os.path.getsize(dump_file):,} bytes)", "ok")
-                        
-                        # Import to destination using Python mysql.connector
-                        log_status(f"Importing to {dest_host}...", "info")
-                        status_label.config(text=f"Importing to {dest_host}...")
-                        compare_win.update()
-                        
-                        import_conn = mysql.connector.connect(
-                            host=dest_host,
-                            port=3306,
-                            user=dest_user,
-                            password=dest_pass if dest_pass else "",
-                            database="offta",
-                            connection_timeout=60
-                        )
-                        import_cursor = import_conn.cursor()
-                        
-                        # Disable foreign key checks and drop existing tables to ensure clean sync
-                        log_status(f"Dropping {len(tables_to_sync)} existing tables...", "info")
-                        import_cursor.execute("SET FOREIGN_KEY_CHECKS=0")
-                        import_cursor.execute("SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO'")
-                        
-                        dropped_count = 0
-                        for tbl in tables_to_sync:
-                            try:
-                                # Force drop without IF EXISTS to ensure it actually happens
-                                import_cursor.execute(f"DROP TABLE `{tbl}`")
-                                dropped_count += 1
-                                log_to_file(f"[Sync] ✓ Dropped table: {tbl}")
-                            except Exception as drop_err:
-                                # Table doesn't exist - that's fine
-                                if "unknown table" in str(drop_err).lower() or "doesn't exist" in str(drop_err).lower():
-                                    log_to_file(f"[Sync] Table {tbl} doesn't exist (ok)")
-                                else:
-                                    log_to_file(f"[Sync] ✗ Failed to drop table {tbl}: {drop_err}")
-                        import_conn.commit()
-                        log_status(f"✓ Dropped {dropped_count}/{len(tables_to_sync)} tables", "ok")
-                        
-                        # Verify tables were dropped
-                        import_cursor.execute("SHOW TABLES")
-                        remaining_tables = [row[0] for row in import_cursor.fetchall() if row[0] in tables_to_sync]
-                        if remaining_tables:
-                            log_status(f"⚠ Warning: {len(remaining_tables)} tables still exist after drop", "warn")
-                            log_to_file(f"[Sync] Tables still present: {remaining_tables}")
-                        else:
-                            log_status(f"✓ All {len(tables_to_sync)} tables dropped successfully", "ok")
-                        
-                        # Read and execute SQL dump (use latin1 to handle binary data in BLOBs)
-                        with open(dump_file, "r", encoding="latin1") as f:
-                            sql_content = f.read()
-                        
-                        # Fix generated column issues - MySQL auto-calculates these
-                        # 1. apartment_listings_price_changes: 'date' column
-                        sql_content = sql_content.replace(
-                            "INSERT INTO `apartment_listings_price_changes` (`id`, `apartment_listings_id`, `new_price`, `time`, `date`)",
-                            "INSERT INTO `apartment_listings_price_changes` (`id`, `apartment_listings_id`, `new_price`, `time`)"
-                        )
-                        sql_content = re.sub(r",'(\d{4}-\d{2}-\d{2})'\)", r")", sql_content)
-                        
-                        # 2. queue_websites: 'hash_key' is GENERATED column - remove from CREATE TABLE and INSERT
-                        # Remove the entire hash_key column definition from CREATE TABLE
-                        sql_content = re.sub(
-                            r",\s*`hash_key`[^,]*GENERATED[^,]*STORED",
-                            "",
-                            sql_content,
-                            flags=re.IGNORECASE
-                        )
-                        # Also remove unique key constraint on hash_key
-                        sql_content = re.sub(
-                            r",\s*UNIQUE KEY `uq_queue_hash` \(`hash_key`\)",
-                            "",
-                            sql_content
-                        )
-                        # Remove hash_key from INSERT column list (appears after `processed_at`)
-                        sql_content = re.sub(
-                            r"(`processed_at`),\s*`hash_key`",
-                            r"\1",
-                            sql_content
-                        )
-                        # Remove hash_key value from VALUES - it's the 15th value (binary string between processed_at and run_interval_minutes)
-                        # The value appears as: '2025-11-08 18:32:22','[binary_data]',4320
-                        # We need to remove: ,'[binary_data]'
-                        sql_content = re.sub(
-                            r"(\`processed_at\`\) VALUES \([^)]*'[\d\-: ]+')\s*,\s*'[^']*'\s*,(\s*\d+\s*,)",
-                            r"\1,\2",
-                            sql_content
-                        )
-                        
-                        # Count statement types
-                        create_count = sql_content.upper().count('CREATE TABLE')
-                        insert_count = sql_content.upper().count('INSERT INTO')
-                        
-                        # Check if dump actually has data
-                        if insert_count == 0:
-                            log_status(f"⚠ WARNING: Dump has no INSERT statements! Source tables may be empty.", "warn")
-                        
-                        log_status(f"Dump contains: {create_count} CREATE, {insert_count} INSERT statements", "info")
-                        
-                        # Import using Python mysql.connector (avoids auth plugin issues with mysql.exe)
-                        log_status(f"Importing SQL statements...", "info")
-                        
-                        # Foreign key checks and SQL mode already set above before dropping tables
-                        
-                        # Split by semicolons that are followed by newline (actual statement terminators)
-                        # This handles multi-line INSERT statements properly
-                        statements = re.split(r';\s*\n', sql_content)
-                        
-                        executed = 0
-                        inserts_executed = 0
-                        for stmt in statements:
-                            stmt = stmt.strip()
-                            if not stmt or stmt.startswith('--') or stmt.startswith('/*'):
-                                continue
-                            
-                            # Skip SET and USE statements from mysqldump
-                            stmt_upper = stmt.upper()
-                            if stmt_upper.startswith('USE ') or stmt_upper.startswith('SET '):
-                                continue
-                            
-                            try:
-                                import_cursor.execute(stmt)
-                                executed += 1
-                                if 'INSERT INTO' in stmt_upper:
-                                    inserts_executed += 1
-                            except Exception as e:
-                                error_msg = str(e)
-                                if 'generated column' not in error_msg.lower():
-                                    log_status(f"⚠ Error: {error_msg[:150]}", "warn")
-                        
-                        import_cursor.execute("SET FOREIGN_KEY_CHECKS=1")
-                        import_conn.commit()
-                        import_cursor.close()
-                        import_conn.close()
-                        
-                        log_status(f"✓ Executed {executed} statements ({inserts_executed} inserts)", "info")
-                        log_status(f"✓ Successfully synced {len(tables_to_sync)} tables!", "ok")
-                        status_label.config(text=f"✓ Sync complete! ({len(tables_to_sync)} tables)", fg="#27AE60")
-                        
-                    except Exception as e:
-                        error_msg = str(e)
-                        if "caching_sha2_password" in error_msg:
-                            error_msg = "Authentication plugin error. Try updating MySQL credentials."
-                        log_status(f"✗ Sync failed: {error_msg}", "err")
-                        status_label.config(text=f"✗ Sync failed", fg="#E74C3C")
-                        log_to_file(f"[Sync] ✗ Sync failed: {e}")
-                        
-                    finally:
-                        progress_bar.stop()
-                        progress_bar.pack_forget()
-                        syncing[0] = False
-                        try:
-                            if os.path.exists(dump_file):
-                                os.remove(dump_file)
-                            os.rmdir(temp_dir)
-                        except:
-                            pass
-                
-                # Button commands
-                def on_local_to_remote():
-                    perform_sync("local_to_remote")
-                
-                def on_remote_to_local():
-                    perform_sync("remote_to_local")
-                
-                def refresh_tables():
-                    """Refresh table data"""
-                    status_label.config(text="Refreshing table data...", fg="#3498DB")
-                    progress_bar.pack(pady=5)
-                    progress_bar.start(10)
-                    compare_win.update()
-                    
-                    try:
-                        log_status("\n" + "="*60, "info")
-                        log_status("Refreshing table data...", "info")
-                        
-                        # Re-fetch table data
-                        local_conn = mysql.connector.connect(
-                            host="localhost",
-                            user="root",
-                            password="",
-                            database="offta"
-                        )
-                        local_cursor = local_conn.cursor()
-                        
-                        remote_conn = mysql.connector.connect(
-                            host="172.104.206.182",
-                            port=3306,
-                            user="seattlelisted_usr",
-                            password="T@5z6^pl}",
-                            database="offta",
-                            connection_timeout=30
-                        )
-                        remote_cursor = remote_conn.cursor()
-                        
-                        # Get tables
-                        local_cursor.execute("SHOW TABLES")
-                        local_tables = {row[0] for row in local_cursor.fetchall()}
-                        
-                        remote_cursor.execute("SHOW TABLES")
-                        remote_tables = {row[0] for row in remote_cursor.fetchall()}
-                        
-                        all_tables = sorted(local_tables | remote_tables)
-                        
-                        # Get row counts
-                        new_table_diffs = []
-                        for table in all_tables:
-                            local_count = "N/A"
-                            remote_count = "N/A"
-                            
-                            if table in local_tables:
-                                try:
-                                    local_cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
-                                    local_count = local_cursor.fetchone()[0]
-                                except:
-                                    local_count = "?"
-                            
-                            if table in remote_tables:
-                                try:
-                                    remote_cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
-                                    remote_count = remote_cursor.fetchone()[0]
-                                except:
-                                    remote_count = "?"
-                            
-                            # Calculate diff
-                            if isinstance(local_count, int) and isinstance(remote_count, int):
-                                diff = local_count - remote_count
-                            else:
-                                diff = "?"
-                            
-                            new_table_diffs.append({
-                                'table': table,
-                                'local': local_count,
-                                'remote': remote_count,
-                                'diff': diff
-                            })
-                        
-                        local_cursor.close()
-                        remote_cursor.close()
-                        
-                        # Clear and rebuild table rows
-                        for widget in scrollable_frame.winfo_children():
-                            if widget != header_frame:
-                                widget.destroy()
-                        
-                        # Rebuild data rows
-                        for idx, diff_data in enumerate(new_table_diffs):
-                            table_name = diff_data['table']
-                            local_val = diff_data['local']
-                            remote_val = diff_data['remote']
-                            diff_val = diff_data['diff']
-                            
-                            # Format display strings
-                            local_display = f"{local_val:,}" if isinstance(local_val, int) else str(local_val)
-                            remote_display = f"{remote_val:,}" if isinstance(remote_val, int) else str(remote_val)
-                            
-                            if diff_val == '?':
-                                diff_str = "?"
-                                diff_color = "#95A5A6"
-                            elif diff_val == 0:
-                                diff_str = "No change"
-                                diff_color = "#95A5A6"
-                            elif diff_val > 0:
-                                diff_str = f"+{diff_val:,}"
-                                diff_color = "#27AE60"
-                            else:
-                                diff_str = f"{diff_val:,}"
-                                diff_color = "#E74C3C"
-                            
-                            row_bg = "#ECF0F1" if idx % 2 == 0 else "white"
-                            row_frame = tk.Frame(scrollable_frame, bg=row_bg, relief="flat")
-                            row_frame.pack(fill="x", pady=1)
-                            
-                            tk.Label(row_frame, text=table_name, bg=row_bg, fg="#2C3E50",
-                                    font=("Segoe UI", 9), width=20, anchor="w").pack(side="left", padx=5, pady=3)
-                            tk.Label(row_frame, text=local_display, 
-                                    bg=row_bg, fg="#2C3E50", font=("Segoe UI", 9), width=10, anchor="center").pack(side="left", padx=5, pady=3)
-                            tk.Label(row_frame, text=remote_display, 
-                                    bg=row_bg, fg="#2C3E50", font=("Segoe UI", 9), width=10, anchor="center").pack(side="left", padx=5, pady=3)
-                            tk.Label(row_frame, text=diff_str, bg=row_bg, fg=diff_color,
-                                    font=("Segoe UI", 9, "bold"), width=15, anchor="center").pack(side="left", padx=5, pady=3)
-                            
-                            btn_frame = tk.Frame(row_frame, bg=row_bg)
-                            btn_frame.pack(side="left", padx=5)
-                            
-                            if isinstance(local_val, int) and local_val > 0:
-                                tk.Button(btn_frame, text="⬆️", bg="#27AE60", fg="white",
-                                        font=("Segoe UI", 8, "bold"), width=3, cursor="hand2",
-                                        command=lambda t=table_name: sync_single_table(t, "local_to_remote")
-                                ).pack(side="left", padx=2)
-                            else:
-                                tk.Label(btn_frame, text="  ", bg=row_bg, width=3).pack(side="left", padx=2)
-                            
-                            if isinstance(remote_val, int) and remote_val > 0:
-                                tk.Button(btn_frame, text="⬇️", bg="#3498DB", fg="white",
-                                        font=("Segoe UI", 8, "bold"), width=3, cursor="hand2",
-                                        command=lambda t=table_name: sync_single_table(t, "remote_to_local")
-                                ).pack(side="left", padx=2)
-                            else:
-                                tk.Label(btn_frame, text="  ", bg=row_bg, width=3).pack(side="left", padx=2)
-                        
-                        # Clean up connections
-                        local_cursor.close()
-                        local_conn.close()
-                        remote_cursor.close()
-                        remote_conn.close()
-                        
-                        log_status(f"✓ Refreshed {len(new_table_diffs)} tables", "ok")
-                        status_label.config(text="✓ Tables refreshed", fg="#27AE60")
-                        
-                    except Exception as e:
-                        log_status(f"✗ Refresh failed: {e}", "err")
-                        status_label.config(text="✗ Refresh failed", fg="#E74C3C")
-                    finally:
-                        # Clean up connections if they exist
-                        try:
-                            local_cursor.close()
-                            local_conn.close()
-                        except:
-                            pass
-                        try:
-                            remote_cursor.close()
-                            remote_conn.close()
-                        except:
-                            pass
-                        progress_bar.stop()
-                        progress_bar.pack_forget()
-                
-                # Create buttons
-                tk.Button(
-                    button_frame,
-                    text="⬆️ Sync Local → Remote",
-                    command=on_local_to_remote,
-                    bg="#27AE60",
-                    fg="white",
-                    font=("Segoe UI", 11, "bold"),
-                    padx=25,
-                    pady=12,
-                    cursor="hand2"
-                ).pack(side="left", padx=5)
-                
-                tk.Button(
-                    button_frame,
-                    text="⬇️ Sync Remote → Local",
-                    command=on_remote_to_local,
-                    bg="#3498DB",
-                    fg="white",
-                    font=("Segoe UI", 11, "bold"),
-                    padx=25,
-                    pady=12,
-                    cursor="hand2"
-                ).pack(side="left", padx=5)
-                
-                tk.Button(
-                    button_frame,
-                    text="🔄 Refresh",
-                    command=refresh_tables,
-                    bg="#F39C12",
-                    fg="white",
-                    font=("Segoe UI", 11, "bold"),
-                    padx=25,
-                    pady=12,
-                    cursor="hand2"
-                ).pack(side="left", padx=5)
-                
-                tk.Button(
-                    button_frame,
-                    text="✗ Close",
-                    command=compare_win.destroy,
-                    bg="#95A5A6",
-                    fg="white",
-                    font=("Segoe UI", 11, "bold"),
-                    padx=25,
-                    pady=12,
-                    cursor="hand2"
-                ).pack(side="left", padx=5)
-                
-
-                
-            except Exception as ex:
-                log_to_file(f"[Sync] Sync button handler error: {ex}")
-                log_exception("Sync button handler error")
-                print(f"[Sync] Sync button handler error: {ex}")
-        
-        def _perform_911_sync():
-            """Sync 911 calls to google_addresses with distance-based matching"""
-            try:
-                from tkinter import messagebox, ttk
-                import mysql.connector
-                import json
-                import math
-                
-                log_to_file("[911 Sync] Starting 911 data sync...")
-                
-                # Create sync window
-                sync_win = tk.Toplevel(root)
-                sync_win.title("911 Data Sync")
-                sync_win.geometry("700x500")
-                sync_win.transient(root)
-                sync_win.resizable(True, True)
-                
-                # Header
-                header = tk.Frame(sync_win, bg="#E74C3C", height=70)
-                header.pack(fill="x")
-                header.pack_propagate(False)
-                
-                tk.Label(
-                    header,
-                    text="🚨 911 Data Sync",
-                    font=("Segoe UI", 14, "bold"),
-                    bg="#E74C3C",
-                    fg="white"
-                ).pack(pady=20)
-                
-                # Status
-                status_frame = tk.Frame(sync_win, bg="white")
-                status_frame.pack(fill="x", padx=20, pady=15)
-                
-                status_label = tk.Label(
-                    status_frame,
-                    text="Initializing...",
-                    font=("Segoe UI", 10),
-                    bg="white",
-                    fg="#2C3E50"
-                )
-                status_label.pack()
-                
-                progress_bar = ttk.Progressbar(status_frame, mode='indeterminate', length=450)
-                progress_bar.pack(pady=10)
-                progress_bar.start(10)
-                
-                # Log area
-                log_frame = tk.Frame(sync_win, bg="white")
-                log_frame.pack(fill="both", expand=True, padx=20, pady=10)
-                
-                log_text = tk.Text(log_frame, bg="#2C3E50", fg="#ECF0F1", font=("Consolas", 9), height=15)
-                log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=log_text.yview)
-                log_text.config(yscrollcommand=log_scroll.set)
-                log_text.pack(side="left", fill="both", expand=True)
-                log_scroll.pack(side="right", fill="y")
-                
-                def log_sync(msg):
-                    log_text.insert("end", f"{msg}\n")
-                    log_text.see("end")
-                    sync_win.update()
-                
-                # Close button (initially disabled)
-                close_btn = tk.Button(
-                    sync_win,
-                    text="Close",
-                    command=sync_win.destroy,
-                    bg="#95A5A6",
-                    fg="white",
-                    font=("Segoe UI", 10, "bold"),
-                    padx=20,
-                    pady=8,
-                    cursor="hand2",
-                    state="disabled"
-                )
-                close_btn.pack(pady=15)
-                
-                sync_win.update()
-                
-                # Haversine distance calculator
-                def haversine_distance(lat1, lon1, lat2, lon2):
-                    """Calculate distance between two points in feet"""
-                    R = 20902231  # Earth's radius in feet (6371 km * 3280.84)
-                    
-                    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-                    dlat = lat2 - lat1
-                    dlon = lon2 - lon1
-                    
-                    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-                    c = 2 * math.asin(math.sqrt(a))
-                    return R * c
-                
-                # Perform sync
-                try:
-                    log_sync("=" * 60)
-                    log_sync("Connecting to database...")
-                    
-                    conn = mysql.connector.connect(
-                        host="localhost",
-                        user="root",
-                        password="",
-                        database="offta"
-                    )
-                    cursor = conn.cursor(dictionary=True)
-                    
-                    # Ensure 911_json column exists
-                    log_sync("Checking google_addresses table structure...")
-                    cursor.execute("""
-                        ALTER TABLE google_addresses 
-                        ADD COLUMN IF NOT EXISTS 911_json JSON DEFAULT NULL
-                    """)
-                    conn.commit()
-                    
-                    # Get all addresses with lat/long
-                    log_sync("Fetching addresses from google_addresses...")
-                    cursor.execute("""
-                        SELECT 
-                            id,
-                            latitude,
-                            longitude,
-                            COALESCE(
-                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.formatted_address')),
-                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.name')),
-                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.vicinity')),
-                                'No address'
-                            ) as address
-                        FROM google_addresses
-                        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-                    """)
-                    addresses = cursor.fetchall()
-                    log_sync(f"Found {len(addresses)} addresses with coordinates")
-                    
-                    # Get all 911 calls
-                    log_sync("Fetching 911 calls...")
-                    try:
-                        cursor.execute("""
-                            SELECT cad_event_number, dispatch_latitude, dispatch_longitude, 
-                                   cad_event_clearance_description, event_datetime
-                            FROM 911_calls_city_1
-                            WHERE dispatch_latitude IS NOT NULL AND dispatch_longitude IS NOT NULL
-                        """)
-                        calls_911 = cursor.fetchall()
-                        log_sync(f"Found {len(calls_911)} 911 calls with coordinates")
-                    except mysql.connector.Error as e:
-                        log_sync(f"Warning: Could not fetch 911 calls table: {e}")
-                        log_sync("Please ensure you have a table with 911 call data")
-                        calls_911 = []
-                    
-                    if not calls_911:
-                        log_sync("No 911 calls found. Sync aborted.")
-                        status_label.config(text="No 911 data available", fg="#E74C3C")
-                        progress_bar.stop()
-                        close_btn.config(state="normal")
-                        return
-                    
-                    # Process each address
-                    status_label.config(text="Matching 911 calls to addresses...")
-                    progress_bar.config(mode='determinate', maximum=len(addresses))
-                    progress_bar['value'] = 0
-                    
-                    distances = [5000, 3000, 2000, 1000, 500]  # feet
-                    processed = 0
-                    
-                    for addr in addresses:
-                        addr_lat = float(addr['latitude'])
-                        addr_lon = float(addr['longitude'])
-                        
-                        # Find calls within each distance
-                        results_by_distance = {}
-                        for dist in distances:
-                            results_by_distance[f"{dist}ft"] = []
-                        
-                        for call in calls_911:
-                            call_lat = float(call['dispatch_latitude'])
-                            call_lon = float(call['dispatch_longitude'])
-                            
-                            distance = haversine_distance(addr_lat, addr_lon, call_lat, call_lon)
-                            
-                            # Add to appropriate distance buckets (store only IDs)
-                            for dist in distances:
-                                if distance <= dist:
-                                    results_by_distance[f"{dist}ft"].append(call.get('cad_event_number'))
-                        
-                        # Create JSON with just event IDs
-                        json_data = {
-                            'total_calls': len(set([c for calls in results_by_distance.values() for c in calls])),
-                            'by_distance': {}
-                        }
-                        
-                        for dist_key, event_ids in results_by_distance.items():
-                            unique_ids = list(set(event_ids))  # Remove duplicates
-                            json_data['by_distance'][dist_key] = {
-                                'count': len(unique_ids),
-                                'event_ids': unique_ids
-                            }
-                        
-                        # Update database
-                        cursor.execute("""
-                            UPDATE google_addresses
-                            SET 911_json = %s
-                            WHERE id = %s
-                        """, (json.dumps(json_data), addr['id']))
-                        
-                        processed += 1
-                        if processed % 10 == 0:
-                            conn.commit()
-                            progress_bar['value'] = processed
-                            log_sync(f"Processed {processed}/{len(addresses)} addresses...")
-                            sync_win.update()
-                    
-                    conn.commit()
-                    
-                    # Record sync completion time
-                    try:
-                        cursor.execute("""
-                            CREATE TABLE IF NOT EXISTS sync_metadata (
-                                sync_type VARCHAR(50) PRIMARY KEY,
-                                last_sync_date DATETIME,
-                                records_processed INT
-                            )
-                        """)
-                        cursor.execute("""
-                            INSERT INTO sync_metadata (sync_type, last_sync_date, records_processed)
-                            VALUES ('911_calls', NOW(), %s)
-                            ON DUPLICATE KEY UPDATE 
-                                last_sync_date = NOW(),
-                                records_processed = %s
-                        """, (processed, processed))
-                        conn.commit()
-                        log_sync(f"✓ Recorded sync completion time")
-                    except Exception as e:
-                        log_sync(f"Warning: Could not record sync time: {e}")
-                    
-                    cursor.close()
-                    conn.close()
-                    
-                    log_sync("=" * 60)
-                    log_sync(f"✓ Successfully processed {processed} addresses")
-                    log_sync(f"✓ 911 data sync complete!")
-                    
-                    status_label.config(text="✓ Sync complete!", fg="#27AE60")
-                    progress_bar.stop()
-                    progress_bar['value'] = progress_bar['maximum']
-                    close_btn.config(state="normal")
-                    
-                except Exception as e:
-                    log_sync(f"✗ Error: {e}")
-                    log_sync(f"✗ Sync failed!")
-                    status_label.config(text="✗ Sync failed", fg="#E74C3C")
-                    progress_bar.stop()
-                    close_btn.config(state="normal")
-                    
-            except Exception as ex:
-                log_to_file(f"[911 Sync] Error: {ex}")
-                messagebox.showerror("911 Sync Error", f"Failed to sync 911 data:\n\n{ex}", parent=root)
-        
-        def _perform_code_sync():
-            """Sync code violations to google_addresses with address/coordinate matching"""
-            try:
-                from tkinter import messagebox, ttk
-                import mysql.connector
-                import json
-                import math
-                
-                log_to_file("[Code Sync] Starting code violations sync...")
-                
-                # Create sync window
-                sync_win = tk.Toplevel(root)
-                sync_win.title("Code Violations Sync")
-                sync_win.geometry("700x500")
-                sync_win.transient(root)
-                sync_win.resizable(True, True)
-                
-                # Header
-                header = tk.Frame(sync_win, bg="#F39C12", height=70)
-                header.pack(fill="x")
-                header.pack_propagate(False)
-                
-                tk.Label(
-                    header,
-                    text="⚠️ Code Violations Sync",
-                    font=("Segoe UI", 14, "bold"),
-                    bg="#F39C12",
-                    fg="white"
-                ).pack(pady=20)
-                
-                # Status
-                status_frame = tk.Frame(sync_win, bg="white")
-                status_frame.pack(fill="x", padx=20, pady=15)
-                
-                status_label = tk.Label(
-                    status_frame,
-                    text="Initializing...",
-                    font=("Segoe UI", 10),
-                    bg="white",
-                    fg="#2C3E50"
-                )
-                status_label.pack()
-                
-                progress_bar = ttk.Progressbar(status_frame, mode='indeterminate', length=450)
-                progress_bar.pack(pady=10)
-                progress_bar.start(10)
-                
-                # Log area
-                log_frame = tk.Frame(sync_win, bg="white")
-                log_frame.pack(fill="both", expand=True, padx=20, pady=10)
-                
-                log_text = tk.Text(log_frame, bg="#2C3E50", fg="#ECF0F1", font=("Consolas", 9), height=15)
-                log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=log_text.yview)
-                log_text.config(yscrollcommand=log_scroll.set)
-                log_text.pack(side="left", fill="both", expand=True)
-                log_scroll.pack(side="right", fill="y")
-                
-                def log_sync(msg):
-                    log_text.insert("end", f"{msg}\n")
-                    log_text.see("end")
-                    sync_win.update()
-                
-                # Close button
-                close_btn = tk.Button(
-                    sync_win,
-                    text="Close",
-                    command=sync_win.destroy,
-                    bg="#95A5A6",
-                    fg="white",
-                    font=("Segoe UI", 10, "bold"),
-                    padx=20,
-                    pady=8,
-                    cursor="hand2",
-                    state="disabled"
-                )
-                close_btn.pack(pady=15)
-                
-                sync_win.update()
-                
-                # Perform sync
-                try:
-                    log_sync("=" * 60)
-                    log_sync("Connecting to database...")
-                    
-                    conn = mysql.connector.connect(
-                        host="localhost",
-                        user="root",
-                        password="",
-                        database="offta"
-                    )
-                    cursor = conn.cursor(dictionary=True)
-                    
-                    # Ensure code_json column exists
-                    log_sync("Checking google_addresses table structure...")
-                    cursor.execute("""
-                        ALTER TABLE google_addresses 
-                        ADD COLUMN IF NOT EXISTS code_json JSON DEFAULT NULL
-                    """)
-                    conn.commit()
-                    
-                    # Get all addresses
-                    log_sync("Fetching addresses from google_addresses...")
-                    cursor.execute("""
-                        SELECT 
-                            id,
-                            latitude,
-                            longitude,
-                            COALESCE(
-                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.formatted_address')),
-                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.name')),
-                                JSON_UNQUOTE(JSON_EXTRACT(json_dump, '$.result.vicinity')),
-                                'No address'
-                            ) as address
-                        FROM google_addresses
-                        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-                    """)
-                    addresses = cursor.fetchall()
-                    log_sync(f"Found {len(addresses)} addresses")
-                    
-                    # Get all code violations from code_data_city_1
-                    log_sync("Fetching code violations...")
-                    try:
-                        cursor.execute("""
-                            SELECT RecordNum, Latitude, Longitude, OriginalAddress1, 
-                                   RecordTypeMapped, OpenDate, StatusCurrent, Description
-                            FROM code_data_city_1
-                            WHERE Latitude IS NOT NULL AND Longitude IS NOT NULL
-                        """)
-                        violations = cursor.fetchall()
-                        log_sync(f"Found {len(violations)} code violations")
-                    except mysql.connector.Error as e:
-                        log_sync(f"Warning: Could not fetch code_data_city_1 table: {e}")
-                        log_sync("Please ensure you have code violations data")
-                        violations = []
-                    
-                    if not violations:
-                        log_sync("No code violations found. Sync aborted.")
-                        status_label.config(text="No code violation data available", fg="#E74C3C")
-                        progress_bar.stop()
-                        close_btn.config(state="normal")
-                        return
-                    
-                    # Process each address
-                    status_label.config(text="Matching code violations to addresses...")
-                    progress_bar.config(mode='determinate', maximum=len(addresses))
-                    progress_bar['value'] = 0
-                    
-                    processed = 0
-                    
-                    for addr in addresses:
-                        matched_violations = []
-                        
-                        # Match by exact address or lat/long
-                        for violation in violations:
-                            matched = False
-                            
-                            # Try address matching
-                            if addr.get('address') and violation.get('OriginalAddress1'):
-                                addr_normalized = addr['address'].lower().strip()
-                                viol_normalized = violation['OriginalAddress1'].lower().strip()
-                                if addr_normalized == viol_normalized:
-                                    matched = True
-                            
-                            # Try coordinate matching (within ~30 feet)
-                            if not matched and addr.get('latitude') and addr.get('longitude'):
-                                if violation.get('Latitude') and violation.get('Longitude'):
-                                    lat_diff = abs(float(addr['latitude']) - float(violation['Latitude']))
-                                    lon_diff = abs(float(addr['longitude']) - float(violation['Longitude']))
-                                    if lat_diff < 0.0001 and lon_diff < 0.0001:  # ~30 feet
-                                        matched = True
-                            
-                            if matched:
-                                matched_violations.append(violation.get('RecordNum'))
-                        
-                        # Create JSON with just record IDs
-                        json_data = {
-                            'total_violations': len(matched_violations),
-                            'record_ids': matched_violations
-                        }
-                        
-                        # Update database
-                        cursor.execute("""
-                            UPDATE google_addresses
-                            SET code_json = %s
-                            WHERE id = %s
-                        """, (json.dumps(json_data), addr['id']))
-                        
-                        processed += 1
-                        if processed % 10 == 0:
-                            conn.commit()
-                            progress_bar['value'] = processed
-                            log_sync(f"Processed {processed}/{len(addresses)} addresses...")
-                            sync_win.update()
-                    
-                    conn.commit()
-                    
-                    # Record sync completion time
-                    try:
-                        cursor.execute("""
-                            CREATE TABLE IF NOT EXISTS sync_metadata (
-                                sync_type VARCHAR(50) PRIMARY KEY,
-                                last_sync_date DATETIME,
-                                records_processed INT
-                            )
-                        """)
-                        cursor.execute("""
-                            INSERT INTO sync_metadata (sync_type, last_sync_date, records_processed)
-                            VALUES ('code_violations', NOW(), %s)
-                            ON DUPLICATE KEY UPDATE 
-                                last_sync_date = NOW(),
-                                records_processed = %s
-                        """, (processed, processed))
-                        conn.commit()
-                        log_sync(f"✓ Recorded sync completion time")
-                    except Exception as e:
-                        log_sync(f"Warning: Could not record sync time: {e}")
-                    
-                    cursor.close()
-                    conn.close()
-                    
-                    log_sync("=" * 60)
-                    log_sync(f"✓ Successfully processed {processed} addresses")
-                    log_sync(f"✓ Code violations sync complete!")
-                    
-                    status_label.config(text="✓ Sync complete!", fg="#27AE60")
-                    progress_bar.stop()
-                    progress_bar['value'] = progress_bar['maximum']
-                    close_btn.config(state="normal")
-                    
-                except Exception as e:
-                    log_sync(f"✗ Error: {e}")
-                    log_sync(f"✗ Sync failed!")
-                    status_label.config(text="✗ Sync failed", fg="#E74C3C")
-                    progress_bar.stop()
-                    close_btn.config(state="normal")
-                    
-            except Exception as ex:
-                log_to_file(f"[Code Sync] Error: {ex}")
-                messagebox.showerror("Code Sync Error", f"Failed to sync code violations:\n\n{ex}", parent=root)
-        
-        sync_btn.bind("<Button-1>", _on_sync_btn)
         
         # Expenses button handler
         def _on_expenses_btn(e):
@@ -11942,15 +11011,15 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 
                 # Fetch from appropriate database table
                 try:
-                    import mysql.connector
-                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
-                    cursor = conn.cursor(dictionary=True)
-                    
                     if is_websites_table:
-                        # Fetch from google_places
+                        # Fetch from google_places (LOCAL DB)
+                        conn = get_external_db()
+                        cursor = conn.cursor(dictionary=True)
                         cursor.execute("SELECT id, Website, Name, availability_website FROM google_places WHERE id = %s", (job_id,))
                     else:
-                        # Fetch from queue_websites
+                        # Fetch from queue_websites (EXTERNAL DB)
+                        conn = get_external_db()
+                        cursor = conn.cursor(dictionary=True)
                         cursor.execute("SELECT * FROM queue_websites WHERE id = %s", (job_id,))
                     
                     job = cursor.fetchone()
@@ -12156,7 +11225,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     log_to_file(f"[Queue] Saving to database: {updates}")
                     
                     import mysql.connector
-                    conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                    conn = get_external_db()
                     cursor = conn.cursor()
                     
                     if is_websites_table:
@@ -12340,14 +11409,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             # Load data in background
             def load_data():
                 try:
-                    conn = mysql.connector.connect(
-                        host='localhost',
-                        port=3306,
-                        user='local_uzr',
-                        password='fuck',
-                        database='offta',
-                        connect_timeout=10
-                    )
+                    conn = get_external_db()
                     cursor = conn.cursor()
                     
                     if filter_type == "price_changes":
@@ -12660,14 +11722,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             def load_data():
                 try:
                     import mysql.connector
-                    conn = mysql.connector.connect(
-                        host='localhost',
-                        port=3306,
-                        user='local_uzr',
-                        password='fuck',
-                        database='offta',
-                        connect_timeout=10
-                    )
+                    conn = get_external_db()
                     cursor = conn.cursor(dictionary=True)
                     
                     query = """
@@ -12772,14 +11827,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             
             # Get subscriber details
             import mysql.connector
-            conn = mysql.connector.connect(
-                host='localhost',
-                port=3306,
-                user='local_uzr',
-                password='fuck',
-                database='offta',
-                connect_timeout=10
-            )
+            conn = get_external_db()
             cursor = conn.cursor(dictionary=True)
             cursor.execute("SELECT * FROM newsletter WHERE id = %s", (subscriber_id,))
             subscriber = cursor.fetchone()
@@ -13062,15 +12110,11 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 # Step 5: Insert into DB
                 result = self._step_insert_db(job_id, table)
                 
-            elif step == "address_match":
-                # Step 6: Address Match - show addresses from JSON
-                result = self._step_address_match(job_id)
-                
             else:
                 raise Exception(f"Unknown step: {step}")
             
             # Mark step as done for synchronous steps only. For UI/long-running windows, leave as running.
-            if step in ("insert_db", "address_match"):
+            if step == "insert_db":
                 def _refresh_ui_running():
                     self._queue_status_label.config(text=f"↻ {step} running for job {job_id} (window opened)")
                     self._refresh_queue_table()
@@ -13246,7 +12290,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             click_y_db = None
             try:
                 import mysql.connector
-                conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                conn = get_external_db()
                 cursor = conn.cursor()
                 cursor.execute("SELECT click_x, click_y FROM queue_websites WHERE id = %s", (job_id,))
                 result = cursor.fetchone()
@@ -13339,7 +12383,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 if coords_result['x'] and coords_result['y']:
                     try:
                         import mysql.connector
-                        conn = mysql.connector.connect(host='localhost', port=3306, user='root', password='', database='offta', connect_timeout=10)
+                        conn = get_external_db()
                         cursor = conn.cursor()
                         cursor.execute("UPDATE queue_websites SET click_x = %s, click_y = %s WHERE id = %s", 
                                      (coords_result['x'], coords_result['y'], job_id))
@@ -14280,7 +13324,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         progress_window.update()
         
         # Upload images via SFTP
-        remote_dir = f"/home/daniel/trustyhousing.com/app/public/img/thumbnails"
+        remote_dir = f"/home/daniel/assets/trustyhousing.com/thumbnails"
         
         uploaded = 0
         skipped = 0
@@ -14479,7 +13523,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         print(f"[4.DB] Found {total_images} images to upload")
         
         # Upload images via SFTP
-        remote_dir = f"/home/daniel/trustyhousing.com/app/public/img/thumbnails"
+        remote_dir = f"/home/daniel/assets/trustyhousing.com/thumbnails"
         
         uploaded = 0
         skipped = 0
@@ -14571,15 +13615,6 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             show_insert_db_window(job_id, self._root)
         
         return "Database insert started"
-    
-    def _step_address_match(self, job_id):
-        """Step 6: Address Match - Show addresses from JSON"""
-        log_to_file(f"[Queue] Starting address match for job {job_id}")
-        
-        # Show address match window (auto-opened, not manual)
-        show_address_match_window(job_id, self._root, manual_open=False)
-        
-        return "Address match window opened"
 
     def _apply_counts(self):
         # Stats chips removed - no longer updating counts
@@ -14746,12 +13781,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         def load_expenses():
             """Load and display expenses data from existing tables"""
             try:
-                conn = mysql.connector.connect(
-                    host="localhost",
-                    user="root",
-                    password="",
-                    database="offta"
-                )
+                conn = get_external_db()
                 cursor = conn.cursor(dictionary=True)
                 
                 # Get OpenAI costs from openai_api_costs table
