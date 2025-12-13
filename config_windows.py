@@ -2025,11 +2025,75 @@ def show_insert_db_window(job_id, parent, table=None):
     log_to_file(f"[Insert DB] Loading JSON from {json_path}...")
     try:
         with open(json_path, "r", encoding="utf-8") as f:
-            listings = json.load(f)
+            raw_data = json.load(f)
+        
+        # Handle different JSON structures
+        log_to_file(f"[Insert DB] Raw JSON type: {type(raw_data).__name__}")
+        if isinstance(raw_data, dict):
+            log_to_file(f"[Insert DB] JSON is dict with keys: {list(raw_data.keys())}")
+            # Check for nested structure with 'properties' key (OpenAI batch format)
+            if 'properties' in raw_data:
+                log_to_file(f"[Insert DB] Found 'properties' key - OpenAI batch format detected")
+                properties = raw_data['properties']
+                listings = []
+                for prop in properties:
+                    # Extract property_info and units
+                    prop_info = prop.get('property_info', {})
+                    units = prop.get('units', [])
+                    amenities = prop.get('amenities', {})
+                    
+                    log_to_file(f"[Insert DB]   Property: {prop_info.get('Building_Name', 'Unknown')}")
+                    log_to_file(f"[Insert DB]     Units count: {len(units)}")
+                    
+                    # Create a listing for each unit
+                    for unit in units:
+                        listing = {
+                            # From property_info
+                            'Building_Name': prop_info.get('Building_Name'),
+                            'full_address': prop_info.get('full_address'),
+                            'city': prop_info.get('city'),
+                            'state': prop_info.get('state'),
+                            'listing_website': prop_info.get('listing_website'),
+                            # From unit
+                            'unit_number': unit.get('unit_number'),
+                            'bedrooms': unit.get('bedrooms'),
+                            'bathrooms': unit.get('bathrooms'),
+                            'sqft': unit.get('sqft'),
+                            'price': unit.get('price'),
+                            'available_date': unit.get('available_date'),
+                            'description': unit.get('description'),
+                            'listing_id': unit.get('unit_number'),  # Use unit number as listing_id
+                        }
+                        # Combine address with unit number for uniqueness
+                        base_addr = prop_info.get('full_address') or ''
+                        unit_num = unit.get('unit_number') or ''
+                        if unit_num and unit_num.lower() != 'null':
+                            listing['full_address'] = f"{base_addr} - {unit_num}".strip(' -')
+                        listings.append(listing)
+                        log_to_file(f"[Insert DB]       Added unit: {listing['full_address']} - ${listing.get('price')}")
+                
+                log_to_file(f"[Insert DB] Expanded {len(properties)} properties into {len(listings)} unit listings")
+            else:
+                # Assume it's a single listing or different format
+                listings = [raw_data]
+        elif isinstance(raw_data, list):
+            log_to_file(f"[Insert DB] JSON is list with {len(raw_data)} items")
+            listings = raw_data
+        else:
+            log_to_file(f"[Insert DB] Unexpected JSON format: {type(raw_data)}")
+            listings = []
+            
         log_to_file(f"[Insert DB] Loaded {len(listings)} listings from JSON")
+        
+        # Log first listing structure for debugging
+        if listings:
+            first_listing = listings[0]
+            log_to_file(f"[Insert DB] First listing keys: {list(first_listing.keys()) if isinstance(first_listing, dict) else 'not a dict'}")
+            log_to_file(f"[Insert DB] First listing sample: {json.dumps(first_listing, indent=2, default=str)[:500]}")
+            
     except Exception as e:
         log_to_file(f"[Insert DB] Failed to load JSON: {e}")
-        log_to_file(f"[Insert DB] Failed to load JSON: {e}")
+        log_to_file(f"[Insert DB] Full error: {repr(e)}")
         messagebox.showerror("Error", f"Failed to load JSON: {e}", parent=parent)
         return
     
@@ -2275,6 +2339,12 @@ def show_insert_db_window(job_id, parent, table=None):
             current_domains = set()
 
             for i, listing in enumerate(listings, 1):
+                # === DETAILED DEBUG LOGGING FOR EACH LISTING ===
+                log_to_file(f"[Insert DB] === Processing listing {i}/{len(listings)} ===")
+                log_to_file(f"[Insert DB] Raw listing JSON keys: {list(listing.keys())}")
+                log_to_file(f"[Insert DB] Raw listing data: {json.dumps(listing, indent=2, default=str)[:2000]}")
+                ui_append(f"\n--- Listing {i}/{len(listings)} ---")
+                
                 # Extract listing data from JSON
                 full_address = listing.get("full_address") or listing.get("address") or ""
                 price = to_int(listing.get("price"), 0)  # INT column in DB
@@ -2291,6 +2361,28 @@ def show_insert_db_window(job_id, parent, table=None):
                 listing_website = listing.get("listing_website") or listing.get("url") or listing.get("link") or None
                 listing_id_from_json = listing.get("listing_id") or None
 
+                # === LOG PARSED VALUES ===
+                log_to_file(f"[Insert DB] PARSED VALUES for listing {i}:")
+                log_to_file(f"[Insert DB]   full_address: '{full_address}'")
+                log_to_file(f"[Insert DB]   price: {price} (raw: {listing.get('price')})")
+                log_to_file(f"[Insert DB]   bedrooms: '{bedrooms}' (raw: {listing.get('bedrooms')})")
+                log_to_file(f"[Insert DB]   bathrooms: '{bathrooms}' (raw: {listing.get('bathrooms')})")
+                log_to_file(f"[Insert DB]   sqft: '{sqft}' (raw: {listing.get('sqft')})")
+                log_to_file(f"[Insert DB]   building_name: '{building_name}'")
+                log_to_file(f"[Insert DB]   city: '{city}'")
+                log_to_file(f"[Insert DB]   state: '{state}'")
+                log_to_file(f"[Insert DB]   listing_website: '{listing_website}'")
+                log_to_file(f"[Insert DB]   available_date: '{available_date}' (raw: {listing.get('available_date')})")
+                log_to_file(f"[Insert DB]   listing_id_from_json: '{listing_id_from_json}'")
+                log_to_file(f"[Insert DB]   img_urls length: {len(img_urls)} chars")
+                log_to_file(f"[Insert DB]   description length: {len(description)} chars")
+                
+                # Show in UI
+                ui_append(f"📍 Address: {full_address[:50]}..." if len(full_address) > 50 else f"📍 Address: {full_address}")
+                ui_append(f"💵 Price: ${price} | 🛏️ Beds: {bedrooms} | 🛁 Baths: {bathrooms} | 📐 Sqft: {sqft}")
+                ui_append(f"🏢 Building: {building_name or 'N/A'}")
+                ui_append(f"🌐 Website: {(listing_website or 'N/A')[:60]}...")
+
                 # Track keys for later deactivation within same source domain
                 if listing_website:
                     try:
@@ -2298,8 +2390,9 @@ def show_insert_db_window(job_id, parent, table=None):
                         dom = _urlparse(listing_website).netloc
                         if dom:
                             current_domains.add(dom)
-                    except Exception:
-                        pass
+                            log_to_file(f"[Insert DB]   Extracted domain: {dom}")
+                    except Exception as url_err:
+                        log_to_file(f"[Insert DB]   Failed to parse domain from URL: {url_err}")
                     current_urls.add(listing_website)
                 if full_address:
                     current_full_addresses.add(full_address)
@@ -2309,66 +2402,136 @@ def show_insert_db_window(job_id, parent, table=None):
                     this_network_id = int(listing.get("network_id") or int(job_id))
                 except Exception:
                     this_network_id = int(job_id)
+                log_to_file(f"[Insert DB]   network_id: {this_network_id}")
 
                 # Determine lookup strategy: prefer listing_website, fallback to full_address
                 existing = None
+                log_to_file(f"[Insert DB] Looking up existing record...")
                 if listing_website:
-                    cursor.execute("SELECT id, price, active FROM apartment_listings WHERE listing_website = %s", (listing_website,))
+                    lookup_query = "SELECT id, price, active FROM apartment_listings WHERE listing_website = %s"
+                    log_to_file(f"[Insert DB]   Lookup by listing_website: {lookup_query} | param: {listing_website}")
+                    ui_append(f"🔍 Lookup by URL...")
+                    cursor.execute(lookup_query, (listing_website,))
                     existing = cursor.fetchone()
+                    log_to_file(f"[Insert DB]   Lookup result by URL: {existing}")
                 if not existing and full_address:
-                    cursor.execute("SELECT id, price, active FROM apartment_listings WHERE full_address = %s", (full_address,))
+                    lookup_query = "SELECT id, price, active FROM apartment_listings WHERE full_address = %s"
+                    log_to_file(f"[Insert DB]   Lookup by full_address: {lookup_query} | param: {full_address}")
+                    ui_append(f"🔍 Lookup by address...")
+                    cursor.execute(lookup_query, (full_address,))
                     existing = cursor.fetchone()
+                    log_to_file(f"[Insert DB]   Lookup result by address: {existing}")
 
                 if existing:
                     listing_id, old_price, _active = existing
+                    log_to_file(f"[Insert DB] ✓ FOUND EXISTING: id={listing_id}, old_price={old_price}, active={_active}")
+                    ui_append(f"📝 Found existing: ID #{listing_id}, old price: ${old_price}")
 
                     # Price change detection (persist to history table and UI)
                     if (old_price or 0) != (price or 0):
+                        log_to_file(f"[Insert DB] 💰 PRICE CHANGE DETECTED: ${old_price} → ${price}")
                         try:
                             change_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            cursor.execute(
-                                """
+                            price_change_sql = """
                                 INSERT INTO apartment_listings_price_changes
                                 (apartment_listings_id, new_price, time)
                                 VALUES (%s, %s, %s)
-                                """,
-                                (listing_id, str(price), change_time)
-                            )
+                            """
+                            price_change_params = (listing_id, str(price), change_time)
+                            log_to_file(f"[Insert DB]   Price change SQL: {price_change_sql.strip()}")
+                            log_to_file(f"[Insert DB]   Price change params: {price_change_params}")
+                            cursor.execute(price_change_sql, price_change_params)
+                            log_to_file(f"[Insert DB]   Price change inserted successfully, rows affected: {cursor.rowcount}")
+                            ui_append(f"💰 Price change recorded: ${old_price} → ${price}")
                         except Exception as pc_err:
-                            log_to_file(f"[Insert DB] Price change insert failed for id {listing_id}: {pc_err}")
+                            log_to_file(f"[Insert DB] ❌ Price change insert failed for id {listing_id}: {pc_err}")
+                            ui_append(f"⚠️ Failed to record price change: {pc_err}")
                         price_change_count += 1
                         status = f"💰 PRICE CHANGE: {(full_address or listing_website)[:60]} ({old_price} → {price})"
                     else:
+                        log_to_file(f"[Insert DB] ✓ Price unchanged: ${price}")
                         status = f"✓ UPDATED: {(full_address or listing_website)[:60]}"
 
                     # Update all fields except price (price is constant)
-                    cursor.execute(
-                        """
+                    update_sql = """
                         UPDATE apartment_listings
                         SET bedrooms=%s, bathrooms=%s, sqft=%s,
                             description=%s, img_urls=%s, available=%s, available_date=%s,
                             time_updated=NOW(), active='yes', network_id=%s, listing_id=%s
                         WHERE id=%s
-                        """,
-                        (bedrooms, bathrooms, sqft, description, img_urls, available, available_date, this_network_id, listing_id_from_json, listing_id)
-                    )
+                    """
+                    update_params = (bedrooms, bathrooms, sqft, description, img_urls, available, available_date, this_network_id, listing_id_from_json, listing_id)
+                    log_to_file(f"[Insert DB] UPDATE SQL: {update_sql.strip()}")
+                    log_to_file(f"[Insert DB] UPDATE params: bedrooms={bedrooms}, bathrooms={bathrooms}, sqft={sqft}, desc_len={len(description)}, img_len={len(img_urls)}, available={available}, available_date={available_date}, network_id={this_network_id}, listing_id={listing_id_from_json}, id={listing_id}")
+                    
+                    try:
+                        cursor.execute(update_sql, update_params)
+                        rows_updated = cursor.rowcount
+                        log_to_file(f"[Insert DB] ✓ UPDATE successful, rows affected: {rows_updated}")
+                        ui_append(f"✓ Updated record ID #{listing_id}, rows affected: {rows_updated}")
+                    except Exception as update_err:
+                        log_to_file(f"[Insert DB] ❌ UPDATE FAILED: {update_err}")
+                        log_to_file(f"[Insert DB]   Full error: {repr(update_err)}")
+                        ui_append(f"❌ UPDATE FAILED: {update_err}")
+                        raise update_err
                 else:
+                    log_to_file(f"[Insert DB] ✨ NEW LISTING - no existing record found")
+                    ui_append(f"✨ NEW listing - inserting...")
+                    
                     # Insert new listing (minimal, using existing schema columns)
-                    cursor.execute(
-                        """
+                    insert_sql = """
                         INSERT INTO apartment_listings
                         (active, bedrooms, bathrooms, sqft, price, img_urls, available, available_date,
                          description, Building_Name, full_address, city, state, listing_website,
                          time_created, time_updated, network_id, listing_id)
                         VALUES ('yes', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s, %s)
-                        """,
-                        (bedrooms, bathrooms, sqft, price, img_urls, available, available_date,
+                    """
+                    insert_params = (bedrooms, bathrooms, sqft, price, img_urls, available, available_date,
                          description, building_name, full_address, city, state, listing_website, this_network_id, listing_id_from_json)
-                    )
+                    
+                    log_to_file(f"[Insert DB] INSERT SQL: {insert_sql.strip()}")
+                    log_to_file(f"[Insert DB] INSERT params:")
+                    log_to_file(f"[Insert DB]   bedrooms={bedrooms}")
+                    log_to_file(f"[Insert DB]   bathrooms={bathrooms}")
+                    log_to_file(f"[Insert DB]   sqft={sqft}")
+                    log_to_file(f"[Insert DB]   price={price}")
+                    log_to_file(f"[Insert DB]   img_urls length={len(img_urls)}")
+                    log_to_file(f"[Insert DB]   available={available}")
+                    log_to_file(f"[Insert DB]   available_date={available_date}")
+                    log_to_file(f"[Insert DB]   description length={len(description)}")
+                    log_to_file(f"[Insert DB]   Building_Name={building_name}")
+                    log_to_file(f"[Insert DB]   full_address={full_address}")
+                    log_to_file(f"[Insert DB]   city={city}")
+                    log_to_file(f"[Insert DB]   state={state}")
+                    log_to_file(f"[Insert DB]   listing_website={listing_website}")
+                    log_to_file(f"[Insert DB]   network_id={this_network_id}")
+                    log_to_file(f"[Insert DB]   listing_id={listing_id_from_json}")
+                    
+                    try:
+                        cursor.execute(insert_sql, insert_params)
+                        new_id = cursor.lastrowid
+                        rows_inserted = cursor.rowcount
+                        log_to_file(f"[Insert DB] ✓ INSERT successful, new ID: {new_id}, rows affected: {rows_inserted}")
+                        ui_append(f"✓ Inserted new record ID #{new_id}")
+                    except Exception as insert_err:
+                        log_to_file(f"[Insert DB] ❌ INSERT FAILED: {insert_err}")
+                        log_to_file(f"[Insert DB]   Full error: {repr(insert_err)}")
+                        log_to_file(f"[Insert DB]   Error type: {type(insert_err).__name__}")
+                        ui_append(f"❌ INSERT FAILED: {insert_err}")
+                        raise insert_err
+                        
                     new_count += 1
                     status = f"✨ NEW: {(full_address or listing_website or 'unknown')[:60]} ({price})"
 
-                conn.commit()
+                # Commit after each listing
+                try:
+                    conn.commit()
+                    log_to_file(f"[Insert DB] ✓ Transaction committed for listing {i}")
+                except Exception as commit_err:
+                    log_to_file(f"[Insert DB] ❌ COMMIT FAILED: {commit_err}")
+                    ui_append(f"❌ Commit failed: {commit_err}")
+                    raise commit_err
+                    
                 processed += 1
 
                 # Update UI
@@ -2388,27 +2551,48 @@ def show_insert_db_window(job_id, parent, table=None):
 
             # Mark inactive listings for this network_id (network_xx):
             # Any active row with the same network_id as current job but not present in this JSON becomes inactive.
+            log_to_file(f"[Insert DB] === DEACTIVATION PHASE ===")
+            log_to_file(f"[Insert DB] Total URLs tracked: {len(current_urls)}")
+            log_to_file(f"[Insert DB] Total addresses tracked: {len(current_full_addresses)}")
+            log_to_file(f"[Insert DB] Domains seen: {current_domains}")
+            ui_append(f"\n--- Deactivation Phase ---")
+            ui_append(f"Checking for inactive listings in network_{job_id}...")
+            
             try:
-                cursor.execute(
-                    "SELECT id, listing_website, full_address FROM apartment_listings WHERE active='yes' AND network_id=%s",
-                    (int(job_id),)
-                )
+                deact_query = "SELECT id, listing_website, full_address FROM apartment_listings WHERE active='yes' AND network_id=%s"
+                log_to_file(f"[Insert DB] Deactivation query: {deact_query} | param: {job_id}")
+                cursor.execute(deact_query, (int(job_id),))
                 rows = cursor.fetchall() or []
+                log_to_file(f"[Insert DB] Found {len(rows)} active listings for network_{job_id}")
+                ui_append(f"Found {len(rows)} active listings to check")
+                
                 deactivated_here = 0
                 for lid, url, fa in rows:
                     present = False
                     if url and url in current_urls:
                         present = True
+                        log_to_file(f"[Insert DB]   ID {lid}: Present (matched by URL)")
                     elif fa and fa in current_full_addresses:
                         present = True
+                        log_to_file(f"[Insert DB]   ID {lid}: Present (matched by address)")
                     if not present:
-                        cursor.execute("UPDATE apartment_listings SET active='no', time_updated=NOW() WHERE id=%s", (lid,))
+                        log_to_file(f"[Insert DB]   ID {lid}: NOT PRESENT - marking inactive (url={url}, addr={fa})")
+                        try:
+                            cursor.execute("UPDATE apartment_listings SET active='no', time_updated=NOW() WHERE id=%s", (lid,))
+                            log_to_file(f"[Insert DB]   ✓ Marked ID {lid} as inactive")
+                            ui_append(f"🔴 Deactivated ID #{lid}: {(fa or url or 'unknown')[:40]}...")
+                        except Exception as deact_row_err:
+                            log_to_file(f"[Insert DB]   ❌ Failed to deactivate ID {lid}: {deact_row_err}")
                         inactive_count += 1
                         deactivated_here += 1
+                        
                 conn.commit()
+                log_to_file(f"[Insert DB] Deactivation complete: {deactivated_here} listings marked inactive")
                 ui_append(f"🧹 Marked {deactivated_here} listing(s) inactive for network_{job_id}")
             except Exception as deact_err:
-                log_to_file(f"[Insert DB] Network-based deactivation failed for network_id={job_id}: {deact_err}")
+                log_to_file(f"[Insert DB] ❌ Network-based deactivation failed for network_id={job_id}: {deact_err}")
+                log_to_file(f"[Insert DB]   Full error: {repr(deact_err)}")
+                ui_append(f"⚠️ Deactivation error: {deact_err}")
 
             ui_set_stats(inactive=inactive_count)
             ui_set_eta("Done!")
@@ -2416,11 +2600,26 @@ def show_insert_db_window(job_id, parent, table=None):
             cursor.close()
             conn.close()
             
-            log_to_file(f"[Insert DB] Job {job_id}: {new_count} new, {price_change_count} price changes, {inactive_count} inactive")
+            # === FINAL SUMMARY ===
+            log_to_file(f"[Insert DB] ==========================================")
+            log_to_file(f"[Insert DB] === FINAL SUMMARY for Job {job_id} ===")
+            log_to_file(f"[Insert DB] ==========================================")
+            log_to_file(f"[Insert DB] Total listings processed: {processed}")
+            log_to_file(f"[Insert DB] New listings inserted: {new_count}")
+            log_to_file(f"[Insert DB] Price changes detected: {price_change_count}")
+            log_to_file(f"[Insert DB] Listings marked inactive: {inactive_count}")
+            log_to_file(f"[Insert DB] Total time elapsed: {time.time() - start_time:.2f} seconds")
+            log_to_file(f"[Insert DB] ==========================================")
             
             # Show completion message
             ui_append("\n" + "="*60)
             ui_append("✅ COMPLETE!")
+            ui_append(f"📊 Summary:")
+            ui_append(f"   • Processed: {processed} listings")
+            ui_append(f"   • New: {new_count}")
+            ui_append(f"   • Price changes: {price_change_count}")
+            ui_append(f"   • Deactivated: {inactive_count}")
+            ui_append(f"   • Time: {time.time() - start_time:.1f}s")
             ui_append("="*60)
             
         except Exception as e:

@@ -8,7 +8,7 @@ try:
         host="127.0.0.1",
         user="local_uzr",
         password="fuck",
-        database="offta"
+        database="offta_local"
     )
     cursor = conn.cursor()
     

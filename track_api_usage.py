@@ -40,7 +40,7 @@ def log_openai_call(model, input_tokens, output_tokens, endpoint="chat.completio
             host="localhost",
             user="root",
             password="",
-            database="offta"
+            database="offta_local"
         )
         cursor = conn.cursor()
         
@@ -91,7 +91,7 @@ def log_google_call(endpoint, calls_count=1, metadata=None):
             host="localhost",
             user="root",
             password="",
-            database="offta"
+            database="offta_local"
         )
         cursor = conn.cursor()
         
@@ -131,7 +131,7 @@ def get_total_costs():
             host="localhost",
             user="root",
             password="",
-            database="offta"
+            database="offta_local"
         )
         cursor = conn.cursor(dictionary=True)
         

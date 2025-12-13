@@ -332,11 +332,11 @@ def ensure_session_before_hud(parent_root) -> bool:
 # CONFIG (env-overridable)
 # ----------------------------
 CFG = {
-    # Database config - using LOCAL MySQL for better performance
-    "MYSQL_HOST": os.getenv("MYSQL_HOST", "127.0.0.1"),
+    # Database config - using EXTERNAL MySQL (172.104.206.182)
+    "MYSQL_HOST": os.getenv("MYSQL_HOST", "172.104.206.182"),
     "MYSQL_PORT": int(os.getenv("MYSQL_PORT", "3306")),
-    "MYSQL_USER": os.getenv("MYSQL_USER", "local_uzr"),
-    "MYSQL_PASSWORD": os.getenv("MYSQL_PASSWORD", "fuck"),
+    "MYSQL_USER": os.getenv("MYSQL_USER", "seattlelisted_usr"),
+    "MYSQL_PASSWORD": os.getenv("MYSQL_PASSWORD", "T@5z6^pl}"),
     "MYSQL_DB": os.getenv("MYSQL_DB", "offta"),
     "MYSQL_LOCK_TIMEOUT": int(os.getenv("MYSQL_LOCK_TIMEOUT", "120")),
     

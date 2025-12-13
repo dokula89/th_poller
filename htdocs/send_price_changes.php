@@ -9,10 +9,10 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST');
 header('Access-Control-Allow-Headers: Content-Type');
 
-// Database connection
-$servername = "localhost";
-$username = "local_uzr";
-$password = "fuck";
+// Database connection (external Linode server)
+$servername = "172.104.206.182";
+$username = "seattlelisted_usr";
+$password = "T@5z6^pl}";
 $database = "offta";
 
 $conn = new mysqli($servername, $username, $password, $database);

@@ -1,0 +1,19 @@
+{
+  "pending_window_width_pct": 0.2,
+  "pending_window_height_pct": 1.0,
+  "parcel_window_width_pct": 0.2,
+  "parcel_window_height_pct": 1.0,
+  "queue_poller_width": 420,
+  "queue_poller_height": 700,
+  "use_macos_menu_bar": false,
+  "pyautogui_pause": 0.05,
+  "browser_path": null,
+  "tesseract_path": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+  "nordvpn_cli_path": "nordvpn",
+  "font_family": "Segoe UI",
+  "font_size_adjustment": 0,
+  "pending_window_x": -3,
+  "pending_window_y": 0,
+  "pending_window_width": 273,
+  "pending_window_height": 768
+}

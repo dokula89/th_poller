@@ -9,7 +9,7 @@ if (isset($_GET['ajax'])) {
       if (strpos($line,'=')!==false){ list($k,$v)=explode('=',$line,2); putenv(trim($k).'='.trim($v)); }
     }
   }
-  $DB_HOST = getenv('DB_HOST') ?: '127.0.0.1';
+  $DB_HOST = getenv('DB_HOST') ?: '172.104.206.182';
   $DB_USER = getenv('DB_USER') ?: 'seattlelisted_usr';
   $DB_PASS = getenv('DB_PASS') ?: 'T@5z6^pl}';
   $DB_NAME = getenv('DB_NAME') ?: 'offta';
@@ -303,7 +303,7 @@ if (file_exists(__DIR__.'/.env')) {
     if (strpos($line,'=')!==false){ list($k,$v)=explode('=',$line,2); putenv(trim($k).'='.trim($v)); }
   }
 }
-$DB_HOST = getenv('DB_HOST') ?: '127.0.0.1';
+$DB_HOST = getenv('DB_HOST') ?: '172.104.206.182';
 $DB_USER = getenv('DB_USER') ?: 'seattlelisted_usr';
 $DB_PASS = getenv('DB_PASS') ?: 'T@5z6^pl}';
 $DB_NAME = getenv('DB_NAME') ?: 'offta';

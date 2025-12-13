@@ -1,0 +1,105 @@
+# Queue Poller - MacOS Setup Guide
+
+## Prerequisites
+
+Before running Queue Poller on Mac, you need to install the following:
+
+### 1. Install Homebrew (Package Manager)
+Open Terminal and run:
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+### 2. Install Python 3
+```bash
+brew install python3
+brew install python-tk
+```
+
+### 3. Install Tesseract OCR (for parcel automation)
+```bash
+brew install tesseract
+```
+
+### 4. Install Git (for auto-updates)
+```bash
+brew install git
+```
+
+### 5. Install NordVPN CLI (optional, for VPN features)
+Download from: https://nordvpn.com/download/mac/
+
+---
+
+## Running Queue Poller
+
+### Option 1: Using Terminal (Recommended)
+1. Open Terminal
+2. Navigate to the Queue Poller folder:
+   ```bash
+   cd /path/to/th_poller
+   ```
+3. Make the start script executable (first time only):
+   ```bash
+   chmod +x start_mac.sh
+   ```
+4. Run the application:
+   ```bash
+   ./start_mac.sh
+   ```
+
+### Option 2: Double-click to Run
+1. Right-click on `start_mac.sh`
+2. Select "Open With" > "Terminal"
+3. If prompted about security, go to System Preferences > Security & Privacy and click "Open Anyway"
+
+---
+
+## Creating a Desktop Shortcut (Optional)
+
+1. Open Automator (search in Spotlight)
+2. Create new "Application"
+3. Add "Run Shell Script" action
+4. Paste this script:
+   ```bash
+   cd /path/to/th_poller
+   ./start_mac.sh
+   ```
+5. Save as "Queue Poller" to your Desktop or Applications folder
+
+---
+
+## Troubleshooting
+
+### "Python not found"
+Run: `brew install python3`
+
+### "tkinter not available"
+Run: `brew install python-tk`
+
+### "Permission denied"
+Run: `chmod +x start_mac.sh`
+
+### App won't open (security warning)
+Go to System Preferences > Security & Privacy > General
+Click "Open Anyway" next to the blocked app message
+
+### MySQL connection issues
+Make sure you're connected to the internet and can reach the database server.
+
+---
+
+## Profile Settings
+
+Queue Poller automatically detects Mac and uses the "OSx" profile with:
+- SF Pro Text font (Mac system font)
+- Slower automation timing for Mac compatibility
+- Correct paths for Tesseract and other tools
+
+You can switch profiles in the app using the Profile dropdown below the Metro selector.
+
+---
+
+## Need Help?
+
+Check the logs in: `th_poller/poller_log.txt`

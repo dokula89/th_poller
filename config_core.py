@@ -104,10 +104,14 @@ def ensure_dir(path):
         log_to_file(f"[Queue] Failed to create directory {path}: {e}")
 
 def php_url(path):
-    """Build PHP URL using configured base URL"""
+    """Build PHP URL using configured base URL with cache-busting timestamp"""
+    import time
     if path.startswith("/"):
         path = path[1:]
-    return f"{PHP_BASE_URL}/{path}"
+    # Add cache-busting parameter
+    separator = "&" if "?" in path else "?"
+    cache_bust = f"{separator}_t={int(time.time() * 1000)}"
+    return f"{PHP_BASE_URL}/{path}{cache_bust}"
 
 # ----------------------------
 

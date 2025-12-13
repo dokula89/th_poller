@@ -2,10 +2,10 @@
 // functions.php: shared DB connection and lookup for address matching
 
 function get_db_connection() {
-    $db_host = 'localhost';
-    $db_user = 'YOUR_DB_USER';
-    $db_pass = 'YOUR_DB_PASS';
-    $db_name = 'YOUR_DB_NAME';
+    $db_host = '172.104.206.182';
+    $db_user = 'seattlelisted_usr';
+    $db_pass = 'T@5z6^pl}';
+    $db_name = 'offta';
     $mysqli = new mysqli($db_host, $db_user, $db_pass, $db_name);
     if ($mysqli->connect_errno) {
         error_log('DB connect error: ' . $mysqli->connect_error);

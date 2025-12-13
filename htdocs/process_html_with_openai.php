@@ -1189,10 +1189,10 @@ function parseListingsLocally(string $htmlFile): array {
   $profiles = load_profiles($profilesDirReal);
   
   // Database connection for google_places lookup
-  // Use same credentials as the poller (see th_poller/config_utils.py)
-  $db_host = getenv('MYSQL_HOST') ?: '127.0.0.1';
-  $db_user = getenv('MYSQL_USER') ?: 'local_uzr';
-  $db_pass = getenv('MYSQL_PASSWORD') ?: 'fuck';
+  // Use external database (Linode server)
+  $db_host = getenv('MYSQL_HOST') ?: '172.104.206.182';
+  $db_user = getenv('MYSQL_USER') ?: 'seattlelisted_usr';
+  $db_pass = getenv('MYSQL_PASSWORD') ?: 'T@5z6^pl}';
   $db_name = getenv('MYSQL_DB') ?: 'offta';
   $db_port = (int)(getenv('MYSQL_PORT') ?: '3306');
   $mysqli = new mysqli($db_host, $db_user, $db_pass, $db_name, $db_port);

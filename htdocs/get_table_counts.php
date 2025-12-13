@@ -10,8 +10,8 @@
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 
-// Database connection
-$host = 'localhost';
+// Database connection (external Linode server)
+$host = '172.104.206.182';
 $user = 'seattlelisted_usr';
 $pass = 'T@5z6^pl}';
 $db = 'offta';

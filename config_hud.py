@@ -25,6 +25,23 @@ import webbrowser
 from tkinter import messagebox
 import mysql.connector
 from mysql.connector import pooling
+import time as _time
+
+# =============================================================================
+# CACHE-BUSTING HELPER FOR API CALLS
+# =============================================================================
+def _no_cache_url(url):
+    """Add cache-busting timestamp to any URL"""
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}_t={int(_time.time() * 1000)}"
+
+def _no_cache_headers():
+    """Return headers that prevent caching"""
+    return {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    }
 
 # =============================================================================
 # PERSISTENT DATABASE CONNECTION POOL (External DB)
@@ -88,11 +105,193 @@ class OldCompactHUD:
         self._d_count = 0
         self._e_count = 0
 
+        # Show startup loader and test DB connection
+        self._show_startup_loader()
+
         # Check for git updates (once per day)
         self._check_and_update_from_git()
 
         # Build UI on main thread
         self._build_ui()
+    
+    def _show_startup_loader(self):
+        """Show startup splash with database connection status"""
+        import tkinter as tk
+        from tkinter import ttk
+        import time
+        
+        # Create splash window
+        splash = tk.Tk()
+        splash.title("Queue Poller - Starting")
+        splash.geometry("400x200")
+        splash.resizable(False, False)
+        splash.configure(bg="#1A1D20")
+        splash.attributes('-topmost', True)
+        splash.overrideredirect(True)  # No title bar
+        
+        # Center on screen
+        splash.update_idletasks()
+        screen_w = splash.winfo_screenwidth()
+        screen_h = splash.winfo_screenheight()
+        x = (screen_w - 400) // 2
+        y = (screen_h - 200) // 2
+        splash.geometry(f"400x200+{x}+{y}")
+        
+        # Main frame with border
+        frame = tk.Frame(splash, bg="#1A1D20", highlightthickness=1, highlightbackground="#2A2F35")
+        frame.pack(fill="both", expand=True, padx=2, pady=2)
+        
+        # Title
+        title_label = tk.Label(
+            frame, 
+            text="🚀 Queue Poller", 
+            font=("Segoe UI", 16, "bold"),
+            bg="#1A1D20", 
+            fg="#E8EAED"
+        )
+        title_label.pack(pady=(20, 5))
+        
+        # Status label
+        status_label = tk.Label(
+            frame, 
+            text="Initializing...", 
+            font=("Segoe UI", 10),
+            bg="#1A1D20", 
+            fg="#A0A6AD"
+        )
+        status_label.pack(pady=(5, 10))
+        
+        # Progress bar
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("Startup.Horizontal.TProgressbar", 
+                       troughcolor='#2A2F35', 
+                       background='#58A6FF',
+                       bordercolor='#2A2F35',
+                       lightcolor='#58A6FF',
+                       darkcolor='#58A6FF')
+        
+        progress_bar = ttk.Progressbar(
+            frame, 
+            mode='determinate', 
+            length=320,
+            style="Startup.Horizontal.TProgressbar"
+        )
+        progress_bar.pack(pady=10)
+        
+        # Detail label
+        detail_label = tk.Label(
+            frame, 
+            text="", 
+            font=("Segoe UI", 8),
+            bg="#1A1D20", 
+            fg="#6A6F75"
+        )
+        detail_label.pack(pady=(5, 0))
+        
+        # Version info
+        version_label = tk.Label(
+            frame, 
+            text="Loading version...", 
+            font=("Segoe UI", 8),
+            bg="#1A1D20", 
+            fg="#4A4F55"
+        )
+        version_label.pack(side="bottom", pady=(0, 10))
+        
+        splash.update()
+        
+        def update_splash(status, detail="", progress=0):
+            try:
+                status_label.config(text=status)
+                detail_label.config(text=detail)
+                progress_bar['value'] = progress
+                splash.update()
+            except:
+                pass
+        
+        # Step 1: Load profiles
+        update_splash("📋 Loading profiles...", "Initializing profile manager", 10)
+        time.sleep(0.2)
+        try:
+            from config_profiles import get_profile_manager
+            pm = get_profile_manager()
+            current_profile = pm.get_current_profile_name()
+            update_splash("📋 Profile loaded", f"Using: {current_profile}", 20)
+        except Exception as e:
+            update_splash("⚠️ Profile warning", str(e)[:50], 20)
+        time.sleep(0.1)
+        
+        # Step 2: Get version info
+        update_splash("📦 Reading version...", "Checking local git version", 30)
+        try:
+            import subprocess
+            from pathlib import Path
+            repo_dir = Path(__file__).parent
+            result = subprocess.run(
+                ['git', 'describe', '--tags', '--always'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            version = result.stdout.strip() if result.returncode == 0 else "unknown"
+            version_label.config(text=f"v{version}")
+            update_splash("📦 Version loaded", f"Version: {version}", 40)
+        except Exception:
+            version_label.config(text="v?.?.?")
+            update_splash("📦 Version check skipped", "", 40)
+        time.sleep(0.1)
+        
+        # Step 3: Test external database connection
+        update_splash("🔌 Connecting to database...", f"Host: {_EXTERNAL_DB_CONFIG['host']}:{_EXTERNAL_DB_CONFIG['port']}", 50)
+        db_connected = False
+        db_error = None
+        try:
+            import mysql.connector
+            conn = mysql.connector.connect(
+                host=_EXTERNAL_DB_CONFIG['host'],
+                port=_EXTERNAL_DB_CONFIG['port'],
+                user=_EXTERNAL_DB_CONFIG['user'],
+                password=_EXTERNAL_DB_CONFIG['password'],
+                database=_EXTERNAL_DB_CONFIG['database'],
+                connect_timeout=10
+            )
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            conn.close()
+            db_connected = True
+            update_splash("✅ Database connected", f"Database: {_EXTERNAL_DB_CONFIG['database']}", 70)
+            log_to_file(f"[Startup] External DB connected: {_EXTERNAL_DB_CONFIG['host']}")
+        except Exception as e:
+            db_error = str(e)
+            update_splash("⚠️ Database warning", db_error[:60], 70)
+            log_to_file(f"[Startup] External DB connection failed: {e}")
+        time.sleep(0.2)
+        
+        # Step 4: Initialize connection pool
+        update_splash("🔧 Setting up connection pool...", "Creating database pool", 80)
+        try:
+            get_external_db()  # This creates the pool
+            update_splash("✅ Connection pool ready", "5 connections available", 90)
+        except Exception as e:
+            update_splash("⚠️ Pool warning", str(e)[:50], 90)
+        time.sleep(0.1)
+        
+        # Step 5: Finalize
+        if db_connected:
+            update_splash("✅ Ready to launch!", "Starting Queue Poller...", 100)
+        else:
+            update_splash("⚠️ Starting with limited connectivity", db_error[:40] if db_error else "", 100)
+        time.sleep(0.3)
+        
+        # Close splash
+        try:
+            splash.destroy()
+        except:
+            pass
 
     # ---------- public API (thread-safe via queue) ----------
         self._cell_tooltips = {}  # Store error tooltips
@@ -129,6 +328,7 @@ class OldCompactHUD:
             from pathlib import Path
             from datetime import datetime, timedelta
             import subprocess
+            import platform
             
             # Get the repository root directory
             repo_dir = Path(__file__).parent
@@ -151,8 +351,51 @@ class OldCompactHUD:
             print("[Git Update] Checking for updates...")
             log_to_file("[Git Update] Checking for updates...")
             
+            # Create progress window
+            import tkinter as tk
+            from tkinter import ttk
+            
+            progress_win = tk.Tk()
+            progress_win.title("Checking for Updates")
+            progress_win.geometry("350x120")
+            progress_win.resizable(False, False)
+            progress_win.attributes('-topmost', True)
+            
+            # Center on screen
+            progress_win.update_idletasks()
+            screen_w = progress_win.winfo_screenwidth()
+            screen_h = progress_win.winfo_screenheight()
+            x = (screen_w - 350) // 2
+            y = (screen_h - 120) // 2
+            progress_win.geometry(f"350x120+{x}+{y}")
+            
+            # Content
+            frame = tk.Frame(progress_win, padx=20, pady=15)
+            frame.pack(fill="both", expand=True)
+            
+            status_label = tk.Label(frame, text="🔄 Checking for updates...", font=("Segoe UI", 10))
+            status_label.pack(pady=(0, 10))
+            
+            progress_bar = ttk.Progressbar(frame, mode='indeterminate', length=300)
+            progress_bar.pack(pady=5)
+            progress_bar.start(10)
+            
+            detail_label = tk.Label(frame, text="Connecting to GitHub...", font=("Segoe UI", 8), fg="gray")
+            detail_label.pack(pady=(5, 0))
+            
+            progress_win.update()
+            
+            def update_status(status, detail=""):
+                try:
+                    status_label.config(text=status)
+                    detail_label.config(text=detail)
+                    progress_win.update()
+                except:
+                    pass
+            
             # Fetch latest from remote
             try:
+                update_status("🔄 Fetching from GitHub...", "git fetch origin")
                 subprocess.run(
                     ["git", "fetch", "origin"],
                     cwd=repo_dir,
@@ -163,18 +406,22 @@ class OldCompactHUD:
             except subprocess.TimeoutExpired:
                 print("[Git Update] Fetch timed out")
                 log_to_file("[Git Update] Fetch timed out")
+                progress_win.destroy()
                 return
             except subprocess.CalledProcessError as e:
                 error_msg = e.stderr.decode() if e.stderr else str(e)
                 print(f"[Git Update] Fetch failed: {error_msg}")
                 log_to_file(f"[Git Update] Fetch failed: {error_msg}")
+                progress_win.destroy()
                 return
             except FileNotFoundError:
                 print("[Git Update] Git not found. Please install git.")
                 log_to_file("[Git Update] Git not found. Please install git.")
+                progress_win.destroy()
                 return
             
             # Check if there are updates
+            update_status("🔍 Comparing versions...", "Checking for new commits")
             try:
                 result = subprocess.run(
                     ["git", "rev-list", "HEAD...origin/main", "--count"],
@@ -189,9 +436,11 @@ class OldCompactHUD:
                 print(f"[Git Update] Error checking commits: {e}")
                 # Update last check time even if check failed
                 last_check_file.touch()
+                progress_win.destroy()
                 return
             
             if commits_behind > 0:
+                update_status(f"📥 Downloading {commits_behind} update(s)...", "git pull origin main")
                 print(f"[Git Update] Found {commits_behind} new commit(s). Updating...")
                 log_to_file(f"[Git Update] Found {commits_behind} new commit(s). Updating...")
                 
@@ -220,6 +469,12 @@ class OldCompactHUD:
                     print(f"[Git Update] {result.stdout}")
                     log_to_file(f"[Git Update] ✓ Updated successfully! {result.stdout}")
                     
+                    update_status("✅ Update complete!", "Restarting application...")
+                    progress_win.update()
+                    import time
+                    time.sleep(1)
+                    progress_win.destroy()
+                    
                     # Auto-restart the application
                     try:
                         import sys
@@ -231,10 +486,15 @@ class OldCompactHUD:
                         python_exe = sys.executable
                         script_path = os.path.abspath(sys.argv[0])
                         
-                        # Start new process
-                        subprocess.Popen([python_exe, script_path], 
-                                        cwd=repo_dir,
-                                        creationflags=subprocess.CREATE_NEW_CONSOLE)
+                        # Platform-specific restart
+                        if platform.system() == "Windows":
+                            subprocess.Popen([python_exe, script_path], 
+                                            cwd=repo_dir,
+                                            creationflags=subprocess.CREATE_NEW_CONSOLE)
+                        else:
+                            # Mac/Linux - no creationflags
+                            subprocess.Popen([python_exe, script_path], 
+                                            cwd=repo_dir)
                         
                         # Exit current process
                         os._exit(0)
@@ -243,7 +503,6 @@ class OldCompactHUD:
                         log_to_file(f"[Git Update] Restart failed: {restart_err}")
                         # Fall back to showing message
                         try:
-                            import tkinter as tk
                             from tkinter import messagebox
                             temp_root = tk.Tk()
                             temp_root.withdraw()
@@ -260,6 +519,7 @@ class OldCompactHUD:
                     error_msg = e.stderr.decode() if e.stderr else str(e)
                     print(f"[Git Update] Pull failed: {error_msg}")
                     log_to_file(f"[Git Update] Pull failed: {error_msg}")
+                    update_status("⚠️ Update failed", "Trying force update...")
                     # Try to recover
                     try:
                         subprocess.run(
@@ -274,11 +534,21 @@ class OldCompactHUD:
                         print(f"[Git Update] Reset failed: {reset_err}")
                         log_to_file(f"[Git Update] Reset failed: {reset_err}")
             else:
+                update_status("✅ Already up to date!", "")
+                progress_bar.stop()
+                progress_win.update()
+                import time
+                time.sleep(0.8)
                 print("[Git Update] Already up to date")
                 log_to_file("[Git Update] Already up to date")
             
             # Update last check time
             last_check_file.touch()
+            
+            try:
+                progress_win.destroy()
+            except:
+                pass
             
         except Exception as e:
             print(f"[Git Update] Error: {e}")
@@ -338,6 +608,13 @@ class OldCompactHUD:
                 log_to_file("[Auth] Session cleared on HUD close")
             except Exception:
                 pass
+            # Close Parcel Activity window if open
+            try:
+                if hasattr(self, '_parcel_activity_win') and self._parcel_activity_win:
+                    self._parcel_activity_win.destroy()
+                    self._parcel_activity_win = None
+            except Exception:
+                pass
             try:
                 root.destroy()
             except Exception:
@@ -361,10 +638,15 @@ class OldCompactHUD:
         root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
         
         try: 
-            # Allow other windows to be on top - don't set -topmost
+            # Keep window always on top
+            root.wm_attributes("-topmost", True)
             root.wm_attributes("-alpha", self._opacity)
-            # Don't use -toolwindow as it can cause always-on-top behavior on Windows
             root.resizable(False, False)
+            # Bind to restore when clicked in taskbar
+            def on_map(event):
+                root.wm_attributes("-topmost", True)
+                root.lift()
+            root.bind("<Map>", on_map)
         except Exception: pass
 
         bg = "#101214"; fg = "#E8EAED"; muted = "#A0A6AD"; ok = "#2ECC71"; warn = "#F4D03F"; err = "#E74C3C"
@@ -1036,17 +1318,17 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
 
         body = tk.Frame(frame, bg=bg); body.pack(fill="both", expand=True, padx=8, pady=(6, 8))
         
-        # Metro selector row (its own line, aligned to right)
+        # Metro selector row with Profile selector on same line
         metro_row = tk.Frame(body, bg=bg)
-        metro_row.pack(fill="x", pady=(0, 8))
+        metro_row.pack(fill="x", pady=(0, 4))
         
         self._selected_metro = tk.StringVar(value="Seattle")
         metro_container = tk.Frame(metro_row, bg=bg)
-        metro_container.pack(side="right", padx=(0, 0))
+        metro_container.pack(side="left", padx=(0, 0))
         
         self._metro_lbl = tk.Label(metro_container, text="Metro:", fg=bg, bg="#2ECC71", font=("Segoe UI", 9, "bold"), padx=6, pady=1)
         self._metro_lbl.pack(side="left", padx=(0, 4))
-        self._metro_combo = ttk.Combobox(metro_container, textvariable=self._selected_metro, width=18, state="readonly", values=["Seattle"])
+        self._metro_combo = ttk.Combobox(metro_container, textvariable=self._selected_metro, width=12, state="readonly", values=["Seattle"])
         self._metro_combo.pack(side="left", padx=(0, 0))
         self._metro_combo.current(0)  # Set to Seattle by default
         # Small loader next to metro combobox (hidden by default)
@@ -1058,10 +1340,70 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         except Exception:
             self._metro_pb = None
         
-        # Version display row (below metro selector)
-        version_row = tk.Frame(body, bg=bg)
-        version_row.pack(fill="x", pady=(0, 4))
+        # Profile selector (same row as Metro, on the right)
+        profile_mgr = get_profile_manager()
+        log_profile_info()
         
+        self._selected_profile = tk.StringVar(value=profile_mgr.active_profile)
+        
+        profile_container = tk.Frame(metro_row, bg=bg)
+        profile_container.pack(side="right")
+        
+        profile_lbl = tk.Label(
+            profile_container, 
+            text="Profile:", 
+            fg=muted, 
+            bg=bg, 
+            font=("Segoe UI", 8)
+        )
+        profile_lbl.pack(side="left", padx=(0, 4))
+        
+        profile_combo = ttk.Combobox(
+            profile_container, 
+            textvariable=self._selected_profile, 
+            width=8, 
+            state="readonly", 
+            values=profile_mgr.available_profiles,
+            font=("Segoe UI", 8)
+        )
+        profile_combo.pack(side="left")
+        
+        def _on_profile_change(event=None):
+            new_profile = self._selected_profile.get()
+            if new_profile != profile_mgr.active_profile:
+                profile_mgr.switch_profile(new_profile)
+                log_to_file(f"[Profile] Switched to: {new_profile}")
+                # Show restart suggestion
+                messagebox.showinfo(
+                    "Profile Changed",
+                    f"Switched to profile: {new_profile}\n\n"
+                    "Restart the application for window sizes to take effect."
+                )
+        
+        profile_combo.bind("<<ComboboxSelected>>", _on_profile_change)
+        
+        # Store profile manager reference
+        self._profile_mgr = profile_mgr
+        
+        # Parcel link + Version row (link on left, version on right)
+        link_version_row = tk.Frame(body, bg=bg)
+        link_version_row.pack(fill="x", pady=(0, 2))
+        
+        # Parcel link display (left side) - read-only for automation verification
+        parcel_link_display = tk.Label(
+            link_version_row,
+            text="",
+            fg="#7F8C8D",  # Gray color - not clickable
+            bg=bg,
+            font=("Segoe UI", 8),
+            anchor="w"
+        )
+        parcel_link_display.pack(side="left")
+        
+        self._parcel_link_row = link_version_row  # Keep reference for show/hide logic
+        self._parcel_link_display = parcel_link_display
+        
+        # Version display (right side of same row)
         def _get_versions():
             """Get local and remote versions"""
             from pathlib import Path
@@ -1104,11 +1446,8 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             version_color = "#E74C3C"  # Red - needs update
             version_icon = "⚠"
         
-        version_container = tk.Frame(version_row, bg=bg)
-        version_container.pack(side="right")
-        
         self._version_lbl = tk.Label(
-            version_container, 
+            link_version_row, 
             text=f"{version_icon} v{local_ver}", 
             fg=version_color, 
             bg=bg, 
@@ -1120,98 +1459,12 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         self._local_version = local_ver
         self._remote_version = remote_ver
         
-        # Profile selector row (below version)
-        profile_row = tk.Frame(body, bg=bg)
-        profile_row.pack(fill="x", pady=(0, 4))
-        
-        profile_mgr = get_profile_manager()
-        log_profile_info()
-        
-        self._selected_profile = tk.StringVar(value=profile_mgr.active_profile)
-        
-        profile_container = tk.Frame(profile_row, bg=bg)
-        profile_container.pack(side="right")
-        
-        profile_lbl = tk.Label(
-            profile_container, 
-            text="Profile:", 
-            fg=muted, 
-            bg=bg, 
-            font=("Segoe UI", 8)
-        )
-        profile_lbl.pack(side="left", padx=(0, 4))
-        
-        profile_combo = ttk.Combobox(
-            profile_container, 
-            textvariable=self._selected_profile, 
-            width=10, 
-            state="readonly", 
-            values=profile_mgr.available_profiles,
-            font=("Segoe UI", 8)
-        )
-        profile_combo.pack(side="left")
-        
-        def _on_profile_change(event=None):
-            new_profile = self._selected_profile.get()
-            if new_profile != profile_mgr.active_profile:
-                profile_mgr.switch_profile(new_profile)
-                log_to_file(f"[Profile] Switched to: {new_profile}")
-                # Show restart suggestion
-                messagebox.showinfo(
-                    "Profile Changed",
-                    f"Switched to profile: {new_profile}\n\n"
-                    "Restart the application for window sizes to take effect."
-                )
-        
-        profile_combo.bind("<<ComboboxSelected>>", _on_profile_change)
-        
-        # Store profile manager reference
-        self._profile_mgr = profile_mgr
-        
         # Restore the progressbar logic
         try:
             pass  # Progressbar already created above
             self._metro_pb.pack_forget()
         except Exception:
             self._metro_pb = None
-        
-        # Parcel link display (full width, below Metro, initially hidden)
-        parcel_link_row = tk.Frame(body, bg=bg)
-        parcel_link_row.pack(fill="x", pady=(0, 8))
-        parcel_link_row.pack_forget()  # Hide initially
-        
-        parcel_link_display = tk.Label(
-            parcel_link_row,
-            text="",
-            fg="#3498DB",
-            bg=bg,
-            font=("Segoe UI", 9, "bold"),
-            cursor="hand2",
-            anchor="w",
-            padx=10,
-            pady=5
-        )
-        parcel_link_display.pack(fill="x", expand=True)
-        
-        # Make link clickable
-        def on_parcel_link_display_click(e):
-            link_text = parcel_link_display.cget("text")
-            if link_text and link_text.startswith("http"):
-                import webbrowser
-                webbrowser.open(link_text)
-                log_to_file(f"[Parcel] Opened link: {link_text}")
-        parcel_link_display.bind("<Button-1>", on_parcel_link_display_click)
-        
-        # Hover effect
-        def on_enter_parcel_display(e):
-            parcel_link_display.config(fg="#2980B9")
-        def on_leave_parcel_display(e):
-            parcel_link_display.config(fg="#3498DB")
-        parcel_link_display.bind("<Enter>", on_enter_parcel_display)
-        parcel_link_display.bind("<Leave>", on_leave_parcel_display)
-        
-        self._parcel_link_row = parcel_link_row
-        self._parcel_link_display = parcel_link_display
         
         # Loader area (hidden by default)
         loader = tk.Frame(body, bg=bg)
@@ -1444,17 +1697,13 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         else:
                             accounts_search_frame.pack_forget()
                         
-                        # Show Parcel refresh button and link display when Parcel tab is active
+                        # Show Parcel refresh button and update link display when Parcel tab is active
                         if hasattr(self, '_parcel_refresh_frame'):
                             if table_name.lower() == 'parcel':
                                 log_to_file(f"[Queue] Showing Parcel refresh frame and link")
                                 self._parcel_refresh_frame.pack(side="left", padx=(12, 0))
                                 
-                                # Show and update parcel link display (full width below Metro)
-                                if hasattr(self, '_parcel_link_row'):
-                                    self._parcel_link_row.pack(fill="x", pady=(0, 8), after=self._metro_lbl.master.master)
-                                
-                                # Query database for parcel link
+                                # Query database for parcel link and update display
                                 try:
                                     import mysql.connector
                                     conn = get_external_db()
@@ -1472,19 +1721,25 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                         log_to_file(f"[Parcel] Setting link display to: {link}")
                                         if hasattr(self, '_parcel_link_display'):
                                             self._parcel_link_display.config(text=link)
-                                        if hasattr(self, '_parcel_link_label'):
-                                            self._parcel_link_label.config(text=link)
                                     else:
                                         log_to_file(f"[Parcel] No link found for metro: {metro}")
                                         if hasattr(self, '_parcel_link_display'):
-                                            self._parcel_link_display.config(text="No parcel link available for this metro")
+                                            self._parcel_link_display.config(text="")
                                 except Exception as link_err:
                                     log_to_file(f"[Parcel] Error loading link: {link_err}")
                             else:
                                 self._parcel_refresh_frame.pack_forget()
-                                # Hide parcel link row
-                                if hasattr(self, '_parcel_link_row'):
-                                    self._parcel_link_row.pack_forget()
+                                # Clear parcel link text when not on Parcel tab
+                                if hasattr(self, '_parcel_link_display'):
+                                    self._parcel_link_display.config(text="")
+                        
+                        # Show Websites auto capture frame when Websites tab is active
+                        if hasattr(self, '_websites_refresh_frame'):
+                            if table_name.lower() in ('listing_websites', 'websites'):
+                                log_to_file(f"[Queue] Showing Websites auto capture frame")
+                                self._websites_refresh_frame.pack(side="left", padx=(12, 0))
+                            else:
+                                self._websites_refresh_frame.pack_forget()
                     except Exception:
                         pass
                     # Metro dropdown is now always visible in the top header; no show/hide per tab
@@ -1615,6 +1870,40 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         
         self._auto_capture_btn = auto_capture_btn
         self._auto_capture_running = False
+        self._auto_capture_paused = False
+        self._auto_capture_debug_mode = tk.BooleanVar(value=False)  # Debug mode off by default
+        self._auto_capture_mode = tk.StringVar(value="manual")  # "manual" or "auto"
+        self._parcel_activity_win = None
+        
+        # Mode selector frame
+        mode_frame = tk.Frame(parcel_refresh_frame, bg=chip_bg)
+        mode_frame.pack(side="left", padx=(6, 0))
+        
+        tk.Radiobutton(
+            mode_frame, text="Manual", variable=self._auto_capture_mode, value="manual",
+            bg=chip_bg, fg=fg, font=("Segoe UI", 8), activebackground=chip_bg,
+            activeforeground=fg, selectcolor=chip_bg
+        ).pack(side="left")
+        
+        tk.Radiobutton(
+            mode_frame, text="Auto", variable=self._auto_capture_mode, value="auto",
+            bg=chip_bg, fg=fg, font=("Segoe UI", 8), activebackground=chip_bg,
+            activeforeground=fg, selectcolor=chip_bg
+        ).pack(side="left")
+        
+        # Debug mode checkbox
+        debug_checkbox = tk.Checkbutton(
+            parcel_refresh_frame,
+            text="🐛 Debug",
+            variable=self._auto_capture_debug_mode,
+            bg=chip_bg,
+            fg=fg,
+            font=("Segoe UI", 8),
+            activebackground=chip_bg,
+            activeforeground=fg,
+            selectcolor=chip_bg
+        )
+        debug_checkbox.pack(side="left", padx=(6, 0))
         
         # Parcel link display (shows the parcel viewer URL)
         parcel_link_label = tk.Label(
@@ -1649,6 +1938,60 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         # Hide by default
         self._parcel_refresh_frame = parcel_refresh_frame
         
+        # ========== WEBSITES AUTO CAPTURE FRAME ==========
+        websites_refresh_frame = tk.Frame(tab_header, bg=chip_bg)
+        
+        # Auto Capture button for Websites tab
+        websites_auto_capture_btn = tk.Button(
+            websites_refresh_frame,
+            text="🌐 Auto Capture",
+            bg="#9B59B6",
+            fg="#fff",
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=1,
+            relief="flat",
+            cursor="hand2",
+            command=lambda: self._start_websites_auto_capture() if hasattr(self, '_start_websites_auto_capture') else None
+        )
+        websites_auto_capture_btn.pack(side="left")
+        
+        # Hover effects for websites auto capture button
+        def on_enter_websites_auto(e):
+            websites_auto_capture_btn.config(bg="#8E44AD")
+        def on_leave_websites_auto(e):
+            websites_auto_capture_btn.config(bg="#9B59B6")
+        websites_auto_capture_btn.bind("<Enter>", on_enter_websites_auto)
+        websites_auto_capture_btn.bind("<Leave>", on_leave_websites_auto)
+        
+        # Folder button for Websites captures
+        websites_folder_btn = tk.Button(
+            websites_refresh_frame,
+            text="📁 Folder",
+            bg="#3498DB",
+            fg="#fff",
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=1,
+            relief="flat",
+            cursor="hand2",
+            command=lambda: self._open_websites_folder() if hasattr(self, '_open_websites_folder') else None
+        )
+        websites_folder_btn.pack(side="left", padx=(6, 0))
+        
+        # Hover effects for folder button
+        def on_enter_websites_folder(e):
+            websites_folder_btn.config(bg="#2980B9")
+        def on_leave_websites_folder(e):
+            websites_folder_btn.config(bg="#3498DB")
+        websites_folder_btn.bind("<Enter>", on_enter_websites_folder)
+        websites_folder_btn.bind("<Leave>", on_leave_websites_folder)
+        
+        self._websites_auto_capture_btn = websites_auto_capture_btn
+        self._websites_auto_capture_running = False
+        self._websites_activity_win = None
+        self._websites_refresh_frame = websites_refresh_frame
+        
         # Treeview table
         self._tree_frame = tk.Frame(self._queue_frame, bg=chip_bg)
         self._tree_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
@@ -1679,7 +2022,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 
                 # Create new tree with appropriate columns
                 if is_parcel:
-                    cols = ("ID", "Address", "Network", "Metro", "Image", "✏️")
+                    cols = ("#", "GAID", "Address", "Metro", "Error", "✏️")
                     log_to_file(f"[Queue] Creating Parcel tree with 6 columns: {cols}")
                 else:
                     cols = ("ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "▶️", "✏️", "hidden1", "hidden2", "hidden3")
@@ -1708,8 +2051,8 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 
                 # Configure columns with proper labels and widths
                 if is_parcel:
-                    labels = ["ID", "Address", "Network", "Metro", "Link", "Data", "✏️"]
-                    widths = [60, 300, 80, 100, 60, 80, 30]
+                    labels = ["#", "GAID", "Address", "Metro", "Error", "✏️"]
+                    widths = [25, 45, 300, 50, 200, 25]
                 else:
                     labels = ["ID", "Link", "Metro", "Int", "Last", "Next", "Status", "Δ$", "+", "-", "Total", "✏️", "", ""]
                     widths = [40, 200, 80, 40, 70, 70, 50, 40, 35, 35, 50, 30, 0, 0]
@@ -1760,9 +2103,12 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     else:
                         self._queue_tree.heading(c, text=label)
                 
-                for c, w in zip(cols, widths):
+                for idx, (c, w) in enumerate(zip(cols, widths)):
                     if w <= 0:
                         self._queue_tree.column(c, width=0, minwidth=0, stretch=False, anchor="center")
+                    elif is_parcel and c == "Address":
+                        # Left-align the Address column for Parcel table
+                        self._queue_tree.column(c, width=w, anchor="w")
                     else:
                         self._queue_tree.column(c, width=w, anchor="center")
                 log_to_file(f"[Queue] Configured {len(cols)} columns")
@@ -1824,16 +2170,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             labels = DEFAULT_LABELS[:]
             widths = DEFAULT_WIDTHS[:]
             try:
-                if t in ("listing_websites", "websites") or custom_source == "websites":
-                    labels[0] = "#"              # Row counter
-                    labels[2] = "Website"
-                    labels[4] = "Name"
-                    labels[5] = "Avail Website"  # Availability Website
-                    widths[0] = 35               # Row counter width
-                    widths[2] = 260
-                    widths[4] = 150              # Name width (reduced)
-                    widths[5] = 200              # Avail Website width
-                elif t == "parcel":
+                if t == "parcel":
                     # Parcel tab: ID, Address, Metro, Image (Yes/No), Edit
                     labels = ["ID", "Address", "Metro", "Image", "✏️"]
                     widths = [60, 450, 100, 60, 30]
@@ -1850,24 +2187,36 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     widths[2] = 0  # Hide Metro column for Networks
                     log_to_file(f"[Queue] Column config: Using Networks config (Metro hidden)")
                 elif t in ("listing_websites", "websites"):
-                    # Websites table: Row counter, ID, Website (icon), Metro, Name, Avail Website, Last Scraped, Play, Edit
+                    # Websites table: #, ID, Link, Metro, Name, Avail Website, Last Scraped, Coords, TAG, Method, Play, Edit
                     labels[0] = "#"              # Column 1: Row counter
+                    labels[1] = "ID"             # Column 2: ID
                     labels[2] = "🔗"            # Column 3: Website link icon
                     labels[3] = "Metro"          # Column 4: Metro (Seattle)
                     labels[4] = "Name"           # Column 5: Building Name
                     labels[5] = "Avail Website"  # Column 6: Availability Website
                     labels[6] = "Last Scraped"   # Column 7: Last scraped timestamp
-                    labels[12] = "▶️"           # Column 13: Play button
-                    labels[13] = "✏️"           # Column 14: Edit button
+                    labels[7] = "Coords"         # Column 8: Click coordinates
+                    labels[8] = "TAG"            # Column 9: CSS/Element tag
+                    labels[9] = "Method"         # Column 10: Extraction method
+                    labels[10] = "▶️"           # Column 11: Play button
+                    labels[11] = "✏️"           # Column 12: Edit button
                     widths[0] = 35               # Row counter width
-                    widths[2] = 30               # Website icon width (just icon)
-                    widths[3] = 100              # Metro width
-                    widths[4] = 200              # Name width (increased since Website is smaller)
-                    widths[5] = 150              # Avail Website width (reduced)
-                    widths[6] = 130              # Last Scraped width
-                    widths[12] = 30              # Play button width
-                    widths[13] = 30              # Edit button width
-                    log_to_file(f"[Queue] Column config: Using Websites config with row counter")
+                    widths[1] = 50               # ID width
+                    widths[2] = 30               # Website icon width
+                    widths[3] = 80               # Metro width
+                    widths[4] = 150              # Name width
+                    widths[5] = 130              # Avail Website width
+                    widths[6] = 90               # Last Scraped width
+                    widths[7] = 80               # Coords width
+                    widths[8] = 90               # TAG width
+                    widths[9] = 70               # Method width
+                    widths[10] = 30              # Play button width
+                    widths[11] = 30              # Edit button width
+                    widths[12] = 0               # hidden1 (full URL) - HIDDEN
+                    widths[13] = 0               # hidden2 (full link) - HIDDEN
+                    widths[14] = 0               # hidden3 (ID) - HIDDEN
+                    widths[15] = 0               # Extra hidden column - HIDDEN
+                    log_to_file(f"[Queue] Column config: Using Websites config with Coords, TAG, and Method")
                 # otherwise default
             except Exception as _maperr:
                 log_to_file(f"[Queue] Column mapping error: {_maperr}")
@@ -1880,13 +2229,15 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
 
         # Event bindings for tooltips and click-to-copy
         def _on_tree_motion(event):
-            """Show tooltip for error messages"""
+            """Show tooltip for error messages and network names"""
             try:
                 item = self._queue_tree.identify_row(event.y)
                 column = self._queue_tree.identify_column(event.x)
                 
                 if item and column:
                     tooltip_key = f"{item}|{column}"
+                    
+                    # Check for cell-specific tooltips first
                     if tooltip_key in self._cell_tooltips:
                         # Show tooltip
                         _hide_tooltip()
@@ -4525,14 +4876,14 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     run_steps(0)
                     return
                 
-                # Handle Play button click (column #12 - ▶️) for Websites tab
-                if column == "#12":
+                # Handle Play button click (column #9 - ▶️) for Websites tab
+                if column == "#9":
                     table = self._current_table.get()
                     if str(table).lower() in ('listing_websites', 'websites'):
                         values = self._queue_tree.item(item, "values")
                         if values and len(values) > 1:
-                            # Extract job_id from column 1 (ID column with checkmark)
-                            job_id_str = str(values[1]).replace("▶", "").replace("✅", "").replace("❌", "").strip()
+                            # Extract job_id from column 1 (ID column without checkmark)
+                            job_id_str = str(values[1]).strip()
                             try:
                                 job_id = int(job_id_str)
                             except:
@@ -4540,12 +4891,17 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             
                             log_to_file(f"[Queue] Play button clicked for Website ID {job_id}")
                             
-                            # Open Websites Activity Window
+                            # Get website info from database
                             try:
                                 import mysql.connector
                                 conn = get_external_db()
                                 cursor = conn.cursor()
-                                cursor.execute("SELECT availability_website, Website, Name FROM google_places WHERE id = %s", (job_id,))
+                                cursor.execute("""
+                                    SELECT availability_website, Website, Name, 
+                                           click_coords_x, click_coords_y, element_tag 
+                                    FROM google_places 
+                                    WHERE id = %s
+                                """, (job_id,))
                                 result = cursor.fetchone()
                                 cursor.close()
                                 conn.close()
@@ -4558,9 +4914,41 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 availability_website = result[0]
                                 building_name = result[2] if len(result) > 2 else ''
                                 
-                                # Create Activity Window on left side (20% width)
-                                screen_w = self._root.winfo_screenwidth()
-                                screen_h = self._root.winfo_screenheight()
+                                # Open Auto Capture window and load this website
+                                log_to_file(f"[Queue Play] Opening Auto Capture window for {building_name} (ID: {job_id})")
+                                
+                                # Set flag to load specific website
+                                self._single_website_mode = {
+                                    'id': job_id,
+                                    'url': availability_website,
+                                    'name': building_name
+                                }
+                                
+                                # If window is already open, close it first
+                                if self._websites_auto_capture_running and hasattr(self, '_websites_activity_win'):
+                                    try:
+                                        self._websites_activity_win.destroy()
+                                    except:
+                                        pass
+                                    self._websites_auto_capture_running = False
+                                    self._websites_activity_win = None
+                                
+                                # Call the Auto Capture start function
+                                if hasattr(self, '_start_websites_auto_capture'):
+                                    self._start_websites_auto_capture()
+                                else:
+                                    log_to_file(f"[Queue Play] Auto Capture function not found")
+                                    self._queue_status_label.config(text="❌ Auto Capture not available")
+                                
+                            except Exception as db_err:
+                                log_to_file(f"[Queue] Play button DB error: {db_err}")
+                                self._queue_status_label.config(text=f"❌ Database error")
+                        return
+                
+                # Handle Edit button click (column #13 - ✏️)
+                if column == "#13":
+                    values = self._queue_tree.item(item, "values")
+                    if values and len(values) > 0:
                                 win_w = int(screen_w * 0.20)
                                 
                                 activity_win = tk.Toplevel(self._root)
@@ -5465,16 +5853,6 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                         log_text.config(state="disabled")
                                         log_to_file(f"[Queue] Browser error: {browser_err}")
                                 
-                                # Auto-launch browser in background thread
-                                import threading
-                                threading.Thread(target=open_website_browser, daemon=True).start()
-                                
-                                log_to_file(f"[Queue] Opened activity window for Website {job_id}")
-                            except Exception as activity_err:
-                                log_to_file(f"[Queue] Failed to open activity window: {activity_err}")
-                                import traceback
-                                traceback.print_exc()
-                    return
                 
                 # Handle Edit button click (column #13 - ✏️)
                 if column == "#13":
@@ -5643,7 +6021,14 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             messagebox.showerror("Error", f"Failed to display data: {json_err}")
                     return
                 
-                if column in step_map:
+                # IMPORTANT: Check for Websites Play button BEFORE step_map
+                # Column #9 is Play button for Websites, but process_db step for Networks
+                table = self._current_table.get()
+                if column == "#9" and str(table).lower() in ('listing_websites', 'websites'):
+                    log_to_file(f"[Queue] Websites Play button detected at column #9")
+                    # This will be handled by the Play button handler below at line ~4870
+                    # DO NOT process as step_map
+                elif column in step_map:
                     # Get the job ID from the first column
                     values = self._queue_tree.item(item, "values")
                     log_to_file(f"[Queue] Row values: {values}")
@@ -6269,7 +6654,11 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     
                     log_to_file(f"[PARCEL AUTOMATION] Collected {len(addresses)} addresses from UI")
                     if addresses:
-                        log_to_file(f"[PARCEL AUTOMATION] First address: ID={addresses[0].get('id')}, Address={addresses[0].get('address')}")
+                        # Randomize address order for better distribution
+                        import random
+                        random.shuffle(addresses)
+                        log_to_file(f"[PARCEL AUTOMATION] Addresses randomized")
+                        log_to_file(f"[PARCEL AUTOMATION] First address (random): ID={addresses[0].get('id')}, Address={addresses[0].get('address')}")
                     
                     if not addresses:
                         log_to_file("[PARCEL AUTOMATION] ERROR: No addresses to process")
@@ -6499,6 +6888,25 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             text=f"✓ Completed {len(results)}/{total} addresses"))
                         log_to_file(f"[PARCEL AUTOMATION] ========== AUTOMATION COMPLETED ==========")
                         
+                        # Close Chrome and activity window on completion
+                        if driver:
+                            try:
+                                log_to_file("[PARCEL AUTOMATION] Closing Chrome on completion...")
+                                driver.quit()
+                                driver = None  # Prevent double-quit in finally
+                                log_to_file("[PARCEL AUTOMATION] Chrome closed")
+                            except Exception as _quit_err:
+                                log_to_file(f"[PARCEL AUTOMATION] Error closing Chrome: {_quit_err}")
+                        
+                        # Close activity window
+                        def close_window():
+                            try:
+                                activity_win.destroy()
+                                log_to_file("[PARCEL AUTOMATION] Activity window closed")
+                            except Exception as _win_err:
+                                log_to_file(f"[PARCEL AUTOMATION] Error closing window: {_win_err}")
+                        self._root.after(1000, close_window)  # Delay 1 sec so user sees completion
+                        
                     except Exception as auto_err:
                         log_to_file(f"[PARCEL AUTOMATION] CRITICAL ERROR: {auto_err}")
                         log_exception("[PARCEL AUTOMATION CRITICAL]")
@@ -6534,7 +6942,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         log_to_file(f"[EMPTY PARCELS WINDOW] API URL: {url}")
                         log_to_file(f"[EMPTY PARCELS WINDOW] Page: {state['page']}, Limit: {state['limit']}")
                         
-                        r = requests.get(url, timeout=30)
+                        r = requests.get(url, headers=_no_cache_headers(), timeout=30)
                         log_to_file(f"[EMPTY PARCELS WINDOW] Response status: {r.status_code}")
                         r.raise_for_status()
                         
@@ -6775,7 +7183,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     try:
                         api_url = php_url("step5/get_major_metros.php?only=names")
                         log_to_file(f"[Metro] Fetching from: {api_url}")
-                        r = requests.get(api_url, timeout=15)  # Increased timeout
+                        r = requests.get(api_url, headers=_no_cache_headers(), timeout=15)  # Increased timeout
                         log_to_file(f"[Metro] Got response: status={r.status_code}")
                         if r.status_code == 200:
                             data = r.json()
@@ -6953,11 +7361,21 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             # Create Parcel Activity Window
             activity_win = tk.Toplevel(root)
             activity_win.title("Parcel Auto Capture")
+            self._parcel_activity_win = activity_win  # Store reference for cleanup
             
-            # PREVENT CLOSE/MINIMIZE - keep window always visible while running
+            # PREVENT CLOSE when running, allow when paused
             def on_close_attempt():
-                """Prevent closing - user must use Stop button"""
-                pass  # Do nothing - ignore close request
+                """Prevent closing while actively running - allow when paused"""
+                if self._auto_capture_paused or not self._auto_capture_running:
+                    # Allow closing when paused or stopped
+                    try:
+                        activity_win.destroy()
+                    except Exception:
+                        pass
+                    self._parcel_activity_win = None
+                    self._auto_capture_running = False
+                    self._auto_capture_btn.config(text="🤖 Auto Capture", bg="#27AE60")
+                # Otherwise do nothing - ignore close request while running
             
             activity_win.protocol("WM_DELETE_WINDOW", on_close_attempt)
             
@@ -6985,53 +7403,85 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             except Exception:
                 pass
             
-            # Position using profile settings
+            # Position using profile settings - 5% from bottom
             profile_mgr = get_profile_manager()
             screen_w = activity_win.winfo_screenwidth()
             screen_h = activity_win.winfo_screenheight()
             
-            # Check for saved geometry first, otherwise use profile defaults
+            # Calculate window size: 20% width, 95% height (5% from bottom)
+            win_w = int(screen_w * 0.20)
+            win_h = int(screen_h * 0.95)
+            x_pos = 0
+            y_pos = 0
+            
+            # Check for saved geometry first
             saved_geom = profile_mgr.get_window_geometry("parcel_window")
             if saved_geom:
                 x_pos, y_pos, win_w, win_h = saved_geom
-                activity_win.geometry(f"{win_w}x{win_h}+{x_pos}+{y_pos}")
-            else:
-                win_w, win_h = profile_mgr.get_parcel_window_size(screen_w, screen_h)
-                activity_win.geometry(f"{win_w}x{win_h}+0+0")
+            
+            activity_win.geometry(f"{win_w}x{win_h}+{x_pos}+{y_pos}")
             activity_win.configure(bg="#2C3E50")
             
-            # Title
-            title_lbl = tk.Label(
-                activity_win,
-                text="🤖 Parcel Auto Capture",
-                font=("Segoe UI", 12, "bold"),
-                bg="#34495E",
-                fg="white",
-                pady=10
-            )
-            title_lbl.pack(fill="x")
+            # Create tabbed interface
+            from tkinter import ttk
             
-            # Progress stats frame
-            stats_frame = tk.Frame(activity_win, bg="#2C3E50")
-            stats_frame.pack(fill="x", padx=10, pady=10)
+            # Style for tabs
+            style = ttk.Style()
+            style.configure("Parcel.TNotebook", background="#2C3E50")
+            style.configure("Parcel.TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=[10, 5])
             
-            def create_stat_label(parent, label_text, value_text="0"):
-                frame = tk.Frame(parent, bg="#34495E", bd=1, relief="solid")
-                frame.pack(fill="x", pady=4)
-                lbl = tk.Label(frame, text=label_text, font=("Segoe UI", 9), bg="#34495E", fg="#BDC3C7", anchor="w")
-                lbl.pack(side="left", padx=8, pady=4)
-                val = tk.Label(frame, text=value_text, font=("Segoe UI", 10, "bold"), bg="#34495E", fg="white", anchor="e")
-                val.pack(side="right", padx=8, pady=4)
-                return val
+            notebook = ttk.Notebook(activity_win, style="Parcel.TNotebook")
+            notebook.pack(fill="both", expand=True, padx=5, pady=5)
             
-            captured_lbl = create_stat_label(stats_frame, "📷 Captured:", "0")
-            processed_lbl = create_stat_label(stats_frame, "✅ Processed:", "0")
-            pending_lbl = create_stat_label(stats_frame, "⏳ Pending:", "0")
-            remaining_lbl = create_stat_label(stats_frame, "📋 Remaining:", "0")
+            # ========== TAB 1: Parcel Auto Capture ==========
+            capture_tab = tk.Frame(notebook, bg="#2C3E50")
+            notebook.add(capture_tab, text="🤖 Auto Capture")
             
-            # Control buttons frame
-            controls_frame = tk.Frame(activity_win, bg="#2C3E50")
-            controls_frame.pack(fill="x", padx=10, pady=10)
+            # ===== TOP: Image Preview (compact) =====
+            preview_frame = tk.Frame(capture_tab, bg="#1C2833", height=150)
+            preview_frame.pack(fill="x", padx=5, pady=5)
+            preview_frame.pack_propagate(False)  # Fixed height
+            
+            tk.Label(preview_frame, text="📷 Last Capture", font=("Segoe UI", 9, "bold"),
+                    bg="#1C2833", fg="white").pack(side="top", pady=2)
+            
+            # Image preview canvas - compact
+            preview_canvas = tk.Canvas(preview_frame, bg="#1C2833", highlightthickness=0, height=100)
+            preview_canvas.pack(fill="both", expand=True, padx=5, pady=2)
+            preview_canvas.create_text(100, 50, text="No capture yet", fill="#7F8C8D", font=("Segoe UI", 8))
+            
+            self._parcel_preview_canvas = preview_canvas
+            self._parcel_preview_image = None
+            
+            # Preview info label
+            preview_info_lbl = tk.Label(preview_frame, text="ID: --", font=("Consolas", 8),
+                                        bg="#1C2833", fg="#BDC3C7")
+            preview_info_lbl.pack(side="bottom", pady=2)
+            self._parcel_preview_info = preview_info_lbl
+            
+            # ===== BELOW: Stats (compact single row) =====
+            stats_frame = tk.Frame(capture_tab, bg="#2C3E50")
+            stats_frame.pack(fill="x", padx=5, pady=2)
+            
+            def create_compact_stat(parent, emoji, value="0", label=""):
+                frame = tk.Frame(parent, bg="#34495E")
+                frame.pack(side="left", padx=2, fill="x", expand=True)
+                lbl = tk.Label(frame, text=f"{emoji}{value}", font=("Segoe UI", 9, "bold"),
+                              bg="#34495E", fg="white", padx=5, pady=1)
+                lbl.pack(side="top")
+                sublbl = tk.Label(frame, text=label, font=("Segoe UI", 7),
+                                 bg="#34495E", fg="#BDC3C7", padx=2)
+                sublbl.pack(side="top")
+                return lbl
+            
+            captured_lbl = create_compact_stat(stats_frame, "📷", "0", "Captured")
+            processed_lbl = create_compact_stat(stats_frame, "✅", "0", "Processed")
+            pending_lbl = create_compact_stat(stats_frame, "⏳", "0", "Pending")
+            remaining_lbl = create_compact_stat(stats_frame, "📋", "0", "Remaining")
+            
+            # Control buttons frame - compact
+            controls_frame = tk.Frame(capture_tab, bg="#2C3E50")
+            controls_frame.pack(fill="x", padx=5, pady=5)
             
             def toggle_pause():
                 if hasattr(self, '_auto_capture_paused'):
@@ -7186,42 +7636,74 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             )
             folder_btn.pack(side="right", fill="x", expand=True, padx=(2, 0))
             
-            # Progress bar frame
-            progress_frame = tk.Frame(activity_win, bg="#2C3E50")
-            progress_frame.pack(fill="x", padx=10, pady=10)
+            # Capture mode selector - compact
+            mode_frame = tk.Frame(capture_tab, bg="#2C3E50")
+            mode_frame.pack(fill="x", padx=5, pady=2)
+            
+            tk.Label(mode_frame, text="Mode:", font=("Segoe UI", 8, "bold"),
+                    bg="#2C3E50", fg="white").pack(side="left", padx=(0, 5))
+            
+            tk.Radiobutton(
+                mode_frame, text="Manual", variable=self._auto_capture_mode, value="manual",
+                bg="#2C3E50", fg="white", font=("Segoe UI", 8), activebackground="#2C3E50",
+                activeforeground="white", selectcolor="#34495E"
+            ).pack(side="left", padx=2)
+            
+            tk.Radiobutton(
+                mode_frame, text="Auto", variable=self._auto_capture_mode, value="auto",
+                bg="#2C3E50", fg="white", font=("Segoe UI", 8), activebackground="#2C3E50",
+                activeforeground="white", selectcolor="#34495E"
+            ).pack(side="left", padx=2)
+            
+            # Debug checkbox inline
+            tk.Checkbutton(
+                mode_frame,
+                text="Debug",
+                variable=self._auto_capture_debug_mode,
+                font=("Segoe UI", 8),
+                bg="#2C3E50",
+                fg="white",
+                activebackground="#2C3E50",
+                activeforeground="white",
+                selectcolor="#34495E"
+            ).pack(side="right", padx=2)
+            
+            # Progress bar frame - compact
+            progress_frame = tk.Frame(capture_tab, bg="#2C3E50")
+            progress_frame.pack(fill="x", padx=5, pady=2)
             
             progress_label = tk.Label(
                 progress_frame,
                 text="Progress: 0%",
-                font=("Segoe UI", 9),
+                font=("Segoe UI", 8),
                 bg="#2C3E50",
                 fg="#ECF0F1"
             )
-            progress_label.pack(anchor="w")
+            progress_label.pack(side="left")
             
             progress_bar = ttk.Progressbar(
                 progress_frame,
                 mode='determinate',
-                length=win_w - 40,
+                length=100,
                 maximum=100
             )
-            progress_bar.pack(fill="x", pady=5)
+            progress_bar.pack(side="right", fill="x", expand=True, padx=5)
             
-            # Current status
+            # Current status - compact
             status_lbl = tk.Label(
-                activity_win,
+                capture_tab,
                 text="Starting...",
-                font=("Segoe UI", 9),
+                font=("Segoe UI", 8),
                 bg="#2C3E50",
                 fg="#ECF0F1",
                 wraplength=win_w - 20,
                 justify="left"
             )
-            status_lbl.pack(fill="x", padx=10, pady=5)
+            status_lbl.pack(fill="x", padx=5, pady=2)
             
-            # Activity log (scrollable)
-            log_frame = tk.Frame(activity_win, bg="#2C3E50")
-            log_frame.pack(fill="both", expand=True, padx=10, pady=10)
+            # Activity log (scrollable) - compact
+            log_frame = tk.Frame(capture_tab, bg="#2C3E50")
+            log_frame.pack(fill="both", expand=True, padx=5, pady=2)
             
             log_scroll = tk.Scrollbar(log_frame)
             log_scroll.pack(side="right", fill="y")
@@ -7233,7 +7715,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 fg="#ECF0F1",
                 wrap="word",
                 yscrollcommand=log_scroll.set,
-                height=30
+                height=10  # Reduced from 20 to make room for image preview
             )
             log_text.pack(side="left", fill="both", expand=True)
             log_scroll.config(command=log_text.yview)
@@ -7245,15 +7727,23 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     if activity_win.winfo_exists():
                         import datetime
                         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                        # Log to both tabs
                         log_text.insert("end", f"[{timestamp}] {msg}\n")
                         log_text.see("end")
+                        log_text_activity.insert("end", f"[{timestamp}] {msg}\n")
+                        log_text_activity.see("end")
                         log_text.update()
                 except:
                     pass
             
+            # Switch to Auto Capture tab when running
+            notebook.select(capture_tab)
+            
             # Store references
             self._parcel_activity_window = activity_win
             self._parcel_activity_log = log_activity
+            self._parcel_notebook = notebook
+            self._parcel_capture_tab = capture_tab
             self._parcel_stats = {
                 'captured': captured_lbl,
                 'processed': processed_lbl,
@@ -7285,6 +7775,48 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             self._safe_activity_update = safe_activity_update
             self._safe_stats_update = safe_stats_update
             
+            # Function to update image preview
+            def update_preview_image(image_path, addr_id=None):
+                """Update the preview canvas with a captured image"""
+                try:
+                    from PIL import Image, ImageTk
+                    if not hasattr(self, '_parcel_preview_canvas') or not self._parcel_preview_canvas.winfo_exists():
+                        return
+                    
+                    # Load and resize image to fit preview
+                    img = Image.open(image_path)
+                    
+                    # Get canvas size
+                    canvas_w = self._parcel_preview_canvas.winfo_width()
+                    canvas_h = self._parcel_preview_canvas.winfo_height()
+                    if canvas_w < 50:  # Not yet rendered
+                        canvas_w, canvas_h = 180, 200
+                    
+                    # Resize maintaining aspect ratio
+                    img_w, img_h = img.size
+                    ratio = min((canvas_w - 10) / img_w, (canvas_h - 10) / img_h)
+                    new_w, new_h = int(img_w * ratio), int(img_h * ratio)
+                    img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                    
+                    # Convert to PhotoImage
+                    photo = ImageTk.PhotoImage(img_resized)
+                    
+                    # Clear canvas and add image
+                    self._parcel_preview_canvas.delete("all")
+                    self._parcel_preview_canvas.create_image(canvas_w//2, canvas_h//2, image=photo, anchor="center")
+                    
+                    # Store reference to prevent garbage collection
+                    self._parcel_preview_image = photo
+                    
+                    # Update info label
+                    if addr_id and hasattr(self, '_parcel_preview_info'):
+                        self._parcel_preview_info.config(text=f"ID: {addr_id}")
+                        
+                except Exception as e:
+                    log_to_file(f"[Preview] Error updating preview: {e}")
+            
+            self._update_preview_image = update_preview_image
+            
             log_activity("🚀 Auto Capture started", "#27AE60")
             
             def _run_auto_capture():
@@ -7294,9 +7826,159 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 from pathlib import Path
                 import subprocess
                 import os
+                import json
                 
                 parcels_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels")
                 parcels_dir.mkdir(parents=True, exist_ok=True)
+                
+                # ============================================================
+                # RETRY: Process any existing JSON files first before new captures
+                # ============================================================
+                def retry_json_inserts():
+                    """Retry inserting data from any unprocessed JSON files"""
+                    json_files = sorted(parcels_dir.glob("openai_batch_*.json"))
+                    if not json_files:
+                        return 0
+                    
+                    self._root.after(0, lambda: self._parcel_activity_log(f"🔄 Found {len(json_files)} JSON files to retry..."))
+                    log_to_file(f"[Auto Capture] Found {len(json_files)} JSON files to retry")
+                    
+                    total_retried = 0
+                    
+                    for json_file in json_files:
+                        try:
+                            self._root.after(0, lambda f=json_file.name: self._parcel_activity_log(f"📄 Processing: {f}"))
+                            
+                            with open(json_file, 'r', encoding='utf-8') as f:
+                                data = json.load(f)
+                            
+                            if not data:
+                                self._root.after(0, lambda f=json_file.name: self._parcel_activity_log(f"⚠️ Empty JSON: {f}"))
+                                continue
+                            
+                            # Import database functions
+                            from config_hud_db import DB_CONFIG
+                            
+                            conn = mysql.connector.connect(**DB_CONFIG)
+                            cursor = conn.cursor()
+                            
+                            inserted = 0
+                            skipped = 0
+                            failed = 0
+                            
+                            for record in data:
+                                try:
+                                    # Check if parcel already exists
+                                    parcel_number = record.get('parcel_number')
+                                    if not parcel_number:
+                                        continue
+                                    
+                                    cursor.execute("SELECT id FROM king_county_parcels WHERE parcel_number = %s", (parcel_number,))
+                                    existing = cursor.fetchone()
+                                    
+                                    if existing:
+                                        skipped += 1
+                                        # Still link the google_address if not linked
+                                        google_addr_id = record.get('google_addresses_id')
+                                        if google_addr_id:
+                                            cursor.execute(
+                                                "UPDATE google_addresses SET king_county_parcels_id = %s WHERE id = %s AND king_county_parcels_id IS NULL",
+                                                (existing[0], google_addr_id)
+                                            )
+                                        continue
+                                    
+                                    # Insert new parcel
+                                    insert_query = """
+                                    INSERT INTO king_county_parcels (
+                                        time_inserted, parcel_number, Present_use, Property_name,
+                                        Jurisdiction, Taxpayer_name, Address, Appraised_value,
+                                        Lot_area, num_of_units, num_of_buildings, Levy_code, google_addresses_id
+                                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    """
+                                    
+                                    google_addr_id = record.get('google_addresses_id')
+                                    values = (
+                                        int(time.time()),
+                                        parcel_number,
+                                        record.get('present_use'),
+                                        record.get('property_name'),
+                                        record.get('jurisdiction'),
+                                        record.get('taxpayer_name'),
+                                        record.get('address'),
+                                        record.get('appraised_value'),
+                                        record.get('lot_area'),
+                                        int(record.get('num_units') or 0),
+                                        int(record.get('num_buildings') or 0),
+                                        record.get('levy_code'),
+                                        google_addr_id
+                                    )
+                                    
+                                    cursor.execute(insert_query, values)
+                                    parcel_id = cursor.lastrowid
+                                    inserted += 1
+                                    
+                                    # Link google_addresses
+                                    if google_addr_id:
+                                        cursor.execute(
+                                            "UPDATE google_addresses SET king_county_parcels_id = %s WHERE id = %s",
+                                            (parcel_id, google_addr_id)
+                                        )
+                                    
+                                except mysql.connector.Error as e:
+                                    if "Duplicate entry" in str(e):
+                                        skipped += 1
+                                    else:
+                                        failed += 1
+                                        log_to_file(f"[Auto Capture] Insert error: {e}")
+                            
+                            conn.commit()
+                            cursor.close()
+                            conn.close()
+                            
+                            total_retried += inserted
+                            
+                            self._root.after(0, lambda i=inserted, s=skipped, f=failed, fn=json_file.name: 
+                                self._parcel_activity_log(f"✅ {fn}: {i} inserted, {s} skipped, {f} failed"))
+                            
+                            # Move JSON to processed folder
+                            processed_dir = parcels_dir / "processed"
+                            processed_dir.mkdir(parents=True, exist_ok=True)
+                            try:
+                                dest = processed_dir / json_file.name
+                                json_file.rename(dest)
+                                self._root.after(0, lambda fn=json_file.name: self._parcel_activity_log(f"📁 Moved {fn} to processed/"))
+                            except Exception as move_err:
+                                log_to_file(f"[Auto Capture] Failed to move JSON: {move_err}")
+                            
+                        except Exception as json_err:
+                            self._root.after(0, lambda e=str(json_err), f=json_file.name: 
+                                self._parcel_activity_log(f"❌ Error processing {f}: {e}"))
+                            log_to_file(f"[Auto Capture] JSON retry error: {json_err}")
+                    
+                    if total_retried > 0:
+                        self._root.after(0, lambda t=total_retried: self._parcel_activity_log(f"🎉 Retry complete: {t} total inserted"))
+                    
+                    return total_retried
+                
+                # Run matcher at startup to link any unlinked parcels
+                try:
+                    self._root.after(0, lambda: self._parcel_activity_log("🔗 Running parcel matcher at startup..."))
+                    from link_parcels_by_number import link_parcels_from_json
+                    result = link_parcels_from_json()
+                    if result and result.get('linked', 0) > 0:
+                        self._root.after(0, lambda r=result: self._parcel_activity_log(f"✅ Matcher: {r['linked']} linked, {r['already_linked']} already done"))
+                    else:
+                        self._root.after(0, lambda: self._parcel_activity_log("✅ Matcher: all parcels already linked"))
+                except Exception as match_err:
+                    log_to_file(f"[Auto Capture] Startup matcher error: {match_err}")
+                    self._root.after(0, lambda e=str(match_err): self._parcel_activity_log(f"⚠️ Matcher error: {e}"))
+                
+                # Run JSON retry at startup
+                try:
+                    retry_json_inserts()
+                except Exception as retry_err:
+                    log_to_file(f"[Auto Capture] Retry error: {retry_err}")
+                    self._root.after(0, lambda e=str(retry_err): self._parcel_activity_log(f"⚠️ Retry error: {e}"))
                 
                 def update_stats():
                     """Update statistics in activity window - safely checks if window exists"""
@@ -7331,6 +8013,12 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 
                 browser_opened = False
                 
+                # Timing tracking
+                capture_start_time = time.time()
+                total_captures = 0
+                capture_times = []  # List of individual capture durations
+                addr_start_time = None  # Track individual capture start
+                
                 try:
                     while self._auto_capture_running:
                         # Check if paused
@@ -7354,17 +8042,97 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             self._root.after(0, lambda: self._parcel_activity_log(f"📦 Processing batch of {len(unprocessed)} images..."))
                             self._root.after(0, lambda: self._safe_stats_update('status', text="🔄 Processing with OpenAI..."))
                             
+                            # Create loader overlay for OpenAI processing
+                            loader_frame = None
+                            loader_start_time = time.time()
+                            loader_cancelled = [False]  # Use list for mutable closure
+                            
+                            def create_loader():
+                                nonlocal loader_frame
+                                try:
+                                    if not activity_win.winfo_exists():
+                                        return
+                                    
+                                    loader_frame = tk.Frame(activity_win, bg="#1C2833", relief="raised", bd=2)
+                                    loader_frame.place(relx=0.5, rely=0.5, anchor="center", width=280, height=180)
+                                    
+                                    # Title
+                                    tk.Label(loader_frame, text="🤖 OpenAI Processing", font=("Segoe UI", 11, "bold"),
+                                            bg="#1C2833", fg="#3498DB").pack(pady=(10, 5))
+                                    
+                                    # Details
+                                    tk.Label(loader_frame, text=f"Processing {len(unprocessed)} images...",
+                                            font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(pady=2)
+                                    
+                                    # Estimated time (approx 2-3 sec per image for API call)
+                                    est_secs = len(unprocessed) * 2.5
+                                    est_str = f"~{int(est_secs//60)}:{int(est_secs%60):02d}" if est_secs >= 60 else f"~{int(est_secs)}s"
+                                    tk.Label(loader_frame, text=f"Est. time: {est_str}",
+                                            font=("Segoe UI", 9), bg="#1C2833", fg="#F39C12").pack(pady=2)
+                                    
+                                    # Progress bar (indeterminate)
+                                    progress = ttk.Progressbar(loader_frame, mode='indeterminate', length=200)
+                                    progress.pack(pady=10)
+                                    progress.start(15)  # Animation speed
+                                    
+                                    # Elapsed time label
+                                    elapsed_lbl = tk.Label(loader_frame, text="Elapsed: 0:00",
+                                                          font=("Consolas", 9), bg="#1C2833", fg="#BDC3C7")
+                                    elapsed_lbl.pack(pady=2)
+                                    
+                                    # Status label
+                                    status_lbl = tk.Label(loader_frame, text="🔄 Sending to OpenAI Vision API...",
+                                                         font=("Segoe UI", 8), bg="#1C2833", fg="#7F8C8D")
+                                    status_lbl.pack(pady=2)
+                                    
+                                    # Update elapsed time every second
+                                    def update_elapsed():
+                                        if loader_cancelled[0] or not loader_frame or not loader_frame.winfo_exists():
+                                            return
+                                        elapsed = time.time() - loader_start_time
+                                        elapsed_lbl.config(text=f"Elapsed: {int(elapsed//60)}:{int(elapsed%60):02d}")
+                                        # Update status based on time
+                                        if elapsed < 5:
+                                            status_lbl.config(text="🔄 Sending images to OpenAI...")
+                                        elif elapsed < 15:
+                                            status_lbl.config(text="🔄 OpenAI analyzing images...")
+                                        elif elapsed < 30:
+                                            status_lbl.config(text="🔄 Extracting parcel data...")
+                                        elif elapsed < 60:
+                                            status_lbl.config(text="🔄 Parsing response & saving...")
+                                        else:
+                                            status_lbl.config(text="🔄 Still processing... please wait")
+                                        activity_win.after(1000, update_elapsed)
+                                    
+                                    activity_win.after(1000, update_elapsed)
+                                except Exception as loader_err:
+                                    log_to_file(f"[Auto Capture] Loader error: {loader_err}")
+                            
+                            def destroy_loader():
+                                nonlocal loader_frame
+                                loader_cancelled[0] = True
+                                try:
+                                    if loader_frame and loader_frame.winfo_exists():
+                                        loader_frame.destroy()
+                                except:
+                                    pass
+                                loader_frame = None
+                            
+                            self._root.after(0, create_loader)
+                            
                             # Run OpenAI processing
                             try:
                                 api_key = os.getenv('OPENAI_API_KEY')
                                 if not api_key:
                                     log_to_file("[Auto Capture] ERROR: OPENAI_API_KEY not set")
+                                    self._root.after(0, destroy_loader)
                                     self._root.after(0, lambda: self._parcel_activity_log("❌ ERROR: OPENAI_API_KEY environment variable not set!"))
                                     break
                                 
                                 # Validate API key format
                                 if not api_key.startswith('sk-'):
                                     log_to_file(f"[Auto Capture] ERROR: Invalid API key format: {api_key[:20]}...")
+                                    self._root.after(0, destroy_loader)
                                     self._root.after(0, lambda: self._parcel_activity_log("❌ ERROR: Invalid OpenAI API key format!"))
                                     break
                                 
@@ -7374,6 +8142,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 # Run process_with_openai.py and stream output to activity window
                                 # Pass environment variables to subprocess
                                 env = os.environ.copy()
+                                openai_start = time.time()
                                 result = subprocess.run(
                                     ['python', 'process_with_openai.py'],
                                     capture_output=True,
@@ -7383,6 +8152,14 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                     timeout=180,  # 3 minute timeout
                                     env=env  # Pass environment variables including API key
                                 )
+                                openai_duration = time.time() - openai_start
+                                
+                                # Destroy loader
+                                self._root.after(0, destroy_loader)
+                                
+                                # Log timing
+                                self._root.after(0, lambda d=openai_duration: self._parcel_activity_log(
+                                    f"⏱️ OpenAI API took {d:.1f}s ({d/len(unprocessed):.1f}s/img)"))
                                 
                                 log_to_file(f"[Auto Capture] OpenAI processing complete: {result.returncode}")
                                 
@@ -7424,22 +8201,48 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                         break  # Stop completely
                                     else:
                                         self._root.after(0, lambda: self._safe_stats_update('status', text="❌ Processing failed"))
-                                        time.sleep(5)
+                                        time.sleep(0.5)
                                         continue  # Retry on non-fatal errors
                                 
                                 # Show detailed output in activity window
-                                db_error_detected = False
+                                db_insert_error = False
                                 inserted_count = 0
+                                skipped_count = 0
+                                failed_count = 0
+                                extraction_error = False
+                                error_details = []
+                                
                                 if result.stdout:
                                     log_to_file(f"[Auto Capture] Output: {result.stdout}")
                                     # Parse and display key information
                                     success_lines = result.stdout.split('\n')
                                     for line in success_lines:
                                         if line.strip():
-                                            # Check for database errors
-                                            if 'Database error' in line or 'Unknown database' in line or 'Linking error' in line:
-                                                db_error_detected = True
-                                            # Extract inserted count
+                                            # Check for CRITICAL database errors (not API tracking logs)
+                                            if '❌ Database error:' in line or 'Failed to connect' in line:
+                                                db_insert_error = True
+                                                error_details.append(line.strip())
+                                            # Check for extraction errors
+                                            if 'ERROR: OpenAI returned no data' in line:
+                                                extraction_error = True
+                                                error_details.append("OpenAI extraction returned no data")
+                                            # Extract counts from summary line: "8 inserted, 10 skipped (duplicates), 0 failed"
+                                            if 'Database insert complete:' in line or 'inserted,' in line:
+                                                try:
+                                                    # Parse: "8 inserted, 10 skipped (duplicates), 0 failed"
+                                                    import re
+                                                    inserted_match = re.search(r'(\d+)\s+inserted', line)
+                                                    skipped_match = re.search(r'(\d+)\s+skipped', line)
+                                                    failed_match = re.search(r'(\d+)\s+failed', line)
+                                                    if inserted_match:
+                                                        inserted_count = int(inserted_match.group(1))
+                                                    if skipped_match:
+                                                        skipped_count = int(skipped_match.group(1))
+                                                    if failed_match:
+                                                        failed_count = int(failed_match.group(1))
+                                                except Exception as parse_err:
+                                                    log_to_file(f"[Auto Capture] Error parsing counts: {parse_err}")
+                                            # Fallback: old format
                                             if 'Total inserted to database:' in line:
                                                 try:
                                                     inserted_count = int(line.split(':')[-1].strip())
@@ -7458,25 +8261,52 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                                 self._parcel_activity_log(f"⚠️ {msg}")
                                             self._root.after(0, log_warn)
                                 
-                                # Report based on actual success, not just return code
-                                if db_error_detected or inserted_count == 0:
-                                    self._root.after(0, lambda: self._parcel_activity_log("⚠️ Batch completed but DATABASE INSERT FAILED!"))
-                                    self._root.after(0, lambda: self._safe_stats_update('status', text="⚠️ DB error - check connection"))
-                                else:
-                                    self._root.after(0, lambda c=inserted_count: self._parcel_activity_log(f"✅ Batch processed successfully! ({c} inserted)"))
+                                # Determine success status
+                                # Success = any inserts OR all were skipped (duplicates already in DB)
+                                total_processed = inserted_count + skipped_count
+                                is_success = (inserted_count > 0) or (skipped_count > 0 and failed_count == 0)
+                                
+                                if db_insert_error or extraction_error:
+                                    error_msg = "; ".join(error_details) if error_details else "Unknown error"
+                                    self._root.after(0, lambda m=error_msg: self._parcel_activity_log(f"❌ Batch FAILED: {m}"))
+                                    self._root.after(0, lambda: self._safe_stats_update('status', text="❌ DB error - check connection"))
+                                elif failed_count > 0:
+                                    self._root.after(0, lambda f=failed_count: self._parcel_activity_log(f"⚠️ Batch completed with {f} insert failures"))
+                                    self._root.after(0, lambda: self._safe_stats_update('status', text="⚠️ Partial failure"))
+                                elif is_success:
+                                    summary = f"✅ Batch complete: {inserted_count} new, {skipped_count} duplicates"
+                                    self._root.after(0, lambda s=summary: self._parcel_activity_log(s))
                                     self._root.after(0, lambda: self._safe_stats_update('status', text="✅ Batch complete, continuing..."))
+                                    
+                                    # Run matcher to link any unlinked parcels
+                                    try:
+                                        self._root.after(0, lambda: self._parcel_activity_log("🔗 Running parcel matcher..."))
+                                        from link_parcels_by_number import link_parcels_from_json
+                                        link_result = link_parcels_from_json()
+                                        if link_result and link_result.get('linked', 0) > 0:
+                                            self._root.after(0, lambda r=link_result: self._parcel_activity_log(f"✅ Matcher: {r['linked']} linked"))
+                                        else:
+                                            self._root.after(0, lambda: self._parcel_activity_log("✅ All parcels linked"))
+                                    except Exception as match_err:
+                                        log_to_file(f"[Auto Capture] Matcher error: {match_err}")
+                                        self._root.after(0, lambda e=str(match_err): self._parcel_activity_log(f"⚠️ Matcher error: {e}"))
+                                else:
+                                    self._root.after(0, lambda: self._parcel_activity_log("⚠️ Batch completed but no records processed"))
+                                    self._root.after(0, lambda: self._safe_stats_update('status', text="⚠️ No records - check images"))
                                 
                                 # Refresh the table
                                 self._root.after(0, lambda: self._trigger_parcel_refresh() if hasattr(self, '_trigger_parcel_refresh') else None)
                                 
-                                # Wait a bit before continuing
-                                time.sleep(5)
+                                # Continue immediately to next address
+                                time.sleep(0.5)
                                 
                             except subprocess.TimeoutExpired:
                                 log_to_file("[Auto Capture] OpenAI processing timed out")
+                                self._root.after(0, destroy_loader)
                                 self._root.after(0, lambda: self._parcel_activity_log("⚠️ OpenAI processing timed out"))
                             except Exception as proc_err:
                                 log_to_file(f"[Auto Capture] Processing error: {proc_err}")
+                                self._root.after(0, destroy_loader)
                                 self._root.after(0, lambda e=str(proc_err): self._parcel_activity_log(f"❌ Error: {e}"))
                         
                         if not self._auto_capture_running:
@@ -7501,6 +8331,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 AND ga.json_dump IS NOT NULL
                                 AND JSON_EXTRACT(ga.json_dump, '$.result') IS NOT NULL
                                 AND mm.metro_name = %s
+                                AND (ga.parcel_error IS NULL OR ga.parcel_error = '')
                                 ORDER BY ga.id ASC
                                 LIMIT 1000
                             """, (metro,))
@@ -7514,11 +8345,10 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             for candidate in candidates:
                                 addr_id = candidate['id']
                                 image_file = parcels_dir / f"parcels_{addr_id}.png"
-                                processed_file = parcels_dir / f"parcels_{addr_id}_processed.png"
-                                skipped_file = parcels_dir / f"parcels_{addr_id}_skipped.png"
+                                skip_marker = parcels_dir / f"parcels_{addr_id}_skipped.txt"
                                 
-                                # Skip if already captured, processed, or marked as skipped
-                                if not image_file.exists() and not processed_file.exists() and not skipped_file.exists():
+                                # Skip if already captured or marked as skipped
+                                if not image_file.exists() and not skip_marker.exists():
                                     next_address = candidate
                                     break
                             
@@ -7526,22 +8356,75 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 log_to_file("[Auto Capture] No more addresses to capture")
                                 self._root.after(0, lambda: self._parcel_activity_log("✅ All addresses captured!"))
                                 self._root.after(0, lambda: self._safe_stats_update('status', text="✅ Complete!"))
+                                
+                                # Close Chrome browser window
+                                try:
+                                    log_to_file("[Auto Capture] Closing Chrome browser...")
+                                    self._root.after(0, lambda: self._parcel_activity_log("🔄 Closing Chrome browser..."))
+                                    import pygetwindow as gw
+                                    for window in gw.getAllWindows():
+                                        if 'chrome' in window.title.lower() or 'parcel viewer' in window.title.lower():
+                                            try:
+                                                window.close()
+                                                log_to_file(f"[Auto Capture] Closed window: {window.title}")
+                                            except Exception as close_err:
+                                                log_to_file(f"[Auto Capture] Could not close window: {close_err}")
+                                    time.sleep(1)
+                                    self._root.after(0, lambda: self._parcel_activity_log("✅ Chrome browser closed"))
+                                except Exception as chrome_err:
+                                    log_to_file(f"[Auto Capture] Error closing Chrome: {chrome_err}")
+                                
+                                # Process remaining JSON files and insert to database
+                                try:
+                                    log_to_file("[Auto Capture] Processing remaining JSON files...")
+                                    self._root.after(0, lambda: self._parcel_activity_log("🔄 Processing JSON files..."))
+                                    
+                                    json_files = list(parcels_dir.glob("parcels_*.json"))
+                                    if json_files:
+                                        from process_with_openai import insert_to_database
+                                        import json as json_module
+                                        
+                                        total_inserted = 0
+                                        for jf in json_files:
+                                            try:
+                                                with open(jf, 'r') as f:
+                                                    data = json_module.load(f)
+                                                if not isinstance(data, list):
+                                                    data = [data]
+                                                
+                                                inserted = insert_to_database(data)
+                                                total_inserted += inserted
+                                                log_to_file(f"[Auto Capture] Inserted {inserted} records from {jf.name}")
+                                                self._root.after(0, lambda n=jf.name, c=inserted: self._parcel_activity_log(f"💾 Inserted {c} from {n}"))
+                                            except Exception as json_err:
+                                                log_to_file(f"[Auto Capture] Error processing {jf.name}: {json_err}")
+                                        
+                                        self._root.after(0, lambda t=total_inserted: self._parcel_activity_log(f"✅ Total: {t} records inserted to king_county_parcels"))
+                                        log_to_file(f"[Auto Capture] Total inserted: {total_inserted} records")
+                                    else:
+                                        log_to_file("[Auto Capture] No JSON files to process")
+                                        self._root.after(0, lambda: self._parcel_activity_log("ℹ️ No JSON files to process"))
+                                except Exception as insert_err:
+                                    log_to_file(f"[Auto Capture] Error during JSON insert: {insert_err}")
+                                    self._root.after(0, lambda e=str(insert_err): self._parcel_activity_log(f"❌ Insert error: {e}"))
+                                
                                 break
                             
                             log_to_file(f"[Auto Capture] Capturing address ID: {next_address['id']}")
                             self._root.after(0, lambda id=next_address['id']: self._parcel_activity_log(f"📸 Capturing address ID: {id}"))
                             self._root.after(0, lambda id=next_address['id']: self._safe_stats_update('status', text=f"📸 Capturing ID: {id}"))
                             
+                            # Start timer for this capture
+                            addr_start_time = time.time()
+                            
                             # Update remaining count
                             self._root.after(0, lambda c=len(candidates): self._safe_stats_update('remaining', text=str(c)))
                             
-                            # Calculate progress percentage (exclude skipped files from captured count)
+                            # Calculate progress percentage
                             remaining = len([c for c in candidates if not (parcels_dir / f"parcels_{c['id']}.png").exists() 
-                                           and not (parcels_dir / f"parcels_{c['id']}_processed.png").exists()
-                                           and not (parcels_dir / f"parcels_{c['id']}_skipped.png").exists()])
+                                           and not (parcels_dir / f"parcels_{c['id']}_skipped.txt").exists()])
                             total_to_capture = len(candidates)
-                            captured_count = len([c for c in candidates if (parcels_dir / f"parcels_{c['id']}.png").exists() 
-                                                 or (parcels_dir / f"parcels_{c['id']}_processed.png").exists()])
+                            captured_count = len([c for c in candidates if (parcels_dir / f"parcels_{c['id']}.png").exists()])
                             progress_pct = int((captured_count / total_to_capture * 100)) if total_to_capture > 0 else 0
                             
                             # Safely update progress bar
@@ -7633,6 +8516,21 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 if not browser_opened:
                                     self._root.after(0, lambda: self._parcel_activity_log(f"🌐 Opening browser with 75% zoom..."))
                                     
+                                    # Close any existing Chrome windows first
+                                    try:
+                                        import pygetwindow as gw
+                                        chrome_windows = [w for w in gw.getAllWindows() if 'chrome' in w.title.lower()]
+                                        for win in chrome_windows:
+                                            try:
+                                                win.close()
+                                            except:
+                                                pass
+                                        if chrome_windows:
+                                            time.sleep(1)
+                                            log_to_file(f"[Auto Capture] Closed {len(chrome_windows)} existing Chrome window(s)")
+                                    except Exception as close_err:
+                                        log_to_file(f"[Auto Capture] Could not close Chrome: {close_err}")
+                                    
                                     # Try to find Chrome and open with zoom flag
                                     chrome_paths = [
                                         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -7647,22 +8545,24 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                             break
                                     
                                     if chrome_path:
-                                        # Open Chrome with force-device-scale-factor flag (0.75 = 75% zoom)
-                                        log_to_file(f"[Auto Capture] Opening Chrome with 75% zoom at: {chrome_path}")
+                                        # Open Chrome with 75% zoom
+                                        log_to_file(f"[Auto Capture] Opening Chrome at: {chrome_path}")
                                         subprocess.Popen([
                                             chrome_path,
-                                            f"--force-device-scale-factor=0.75",
                                             "--new-window",
+                                            "--force-device-scale-factor=0.75",
+                                            "--safebrowsing-disable-download-protection",
+                                            "--disable-features=SafeBrowsingEnhancedProtection",
                                             parcel_link
                                         ])
-                                        self._root.after(0, lambda: self._parcel_activity_log(f"✅ Chrome launched with 75% zoom"))
+                                        self._root.after(0, lambda: self._parcel_activity_log(f"✅ Chrome launched"))
                                     else:
                                         # Fallback to default browser
                                         log_to_file("[Auto Capture] Chrome not found, using default browser")
                                         self._root.after(0, lambda: self._parcel_activity_log(f"⚠️ Chrome not found, using default browser"))
                                         webbrowser.open(parcel_link)
                                     
-                                    time.sleep(4)  # Wait for Chrome to start
+                                    time.sleep(3)  # Wait for Chrome to start
                                     
                                     # Position browser window to right 80% of screen
                                     try:
@@ -7688,15 +8588,16 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                             browser_window.moveTo(window_x, window_y)
                                             browser_window.resizeTo(window_width, window_height)
                                             browser_window.activate()
-                                            log_to_file(f"[Auto Capture] Positioned browser at ({window_x}, {window_y})")
-                                            self._root.after(0, lambda: self._parcel_activity_log(f"✅ Browser positioned at right 80%"))
+                                            log_to_file(f"[Auto Capture] Positioned browser at ({window_x}, {window_y}), 75% zoom")
+                                            
+                                            self._root.after(0, lambda: self._parcel_activity_log(f"✅ Browser: right 80%, 75% zoom"))
                                         else:
                                             log_to_file("[Auto Capture] Could not find browser window to position")
                                             self._root.after(0, lambda: self._parcel_activity_log(f"⚠️ Could not position browser"))
                                     except Exception as pos_err:
                                         log_to_file(f"[Auto Capture] Window positioning error: {pos_err}")
                                     
-                                    time.sleep(4)  # Wait for page load after positioning
+                                    time.sleep(2)  # Wait for page load after positioning
                                     browser_opened = True
                                     self._root.after(0, lambda: self._parcel_activity_log(f"✅ Browser ready"))
                                 
@@ -7709,147 +8610,607 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                     break
                                 
                                 # For subsequent addresses, use the search field
-                                self._root.after(0, lambda a=address_text: self._parcel_activity_log(f"🔍 Searching for: {a}"))
+                                self._root.after(0, lambda a=address_text: self._parcel_activity_log(f"🔍 {a}"))
                                 
                                 # Click search field at exact coordinates (459, 199) - NOT adjusted
                                 search_field_x = 459
                                 search_field_y = 199
                                 
-                                # Triple-click to select all existing text
-                                pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.1)
-                                time.sleep(0.2)
+                                # Step 1: Triple-click to select all existing text
+                                pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.02)
                                 
-                                # Delete existing content - press backspace 30 times to ensure it's cleared
-                                for _ in range(30):
-                                    pyautogui.press('backspace')
-                                time.sleep(0.1)
+                                # Step 2: Delete existing content - FAST 200 chars
+                                pyautogui.press('backspace', presses=200, interval=0.005)
                                 
-                                # Type new address - much faster now
-                                pyautogui.write(address_text, interval=0.01)
+                                # Step 3: Type new address - FAST
+                                pyautogui.write(address_text, interval=0.003)
                                 
-                                # Press Enter to submit
-                                time.sleep(0.2)
+                                # Step 4: Press Enter to submit - immediately
                                 pyautogui.press('enter')
-                                time.sleep(2)  # Wait briefly to see if error popup appears
                                 
-                                # Check if there's an error alert by taking a quick screenshot and looking for very bright regions
-                                try:
-                                    quick_check = ImageGrab.grab()
-                                    check_array = np.array(quick_check)
-                                    check_gray = cv2.cvtColor(check_array, cv2.COLOR_RGB2GRAY)
-                                    _, check_thresh = cv2.threshold(check_gray, 250, 255, cv2.THRESH_BINARY)
-                                    bright_pixels = np.sum(check_thresh == 255)
-                                    total_pixels = check_thresh.size
-                                    bright_ratio = bright_pixels / total_pixels
+                                # Step 5: Short delay for popup to render (was 5s, now 0.5s)
+                                self._root.after(0, lambda: self._parcel_activity_log(f"⏳ Loading..."))
+                                time.sleep(0.5)
+                                
+                                # Get debug mode setting (used throughout)
+                                debug_mode = self._auto_capture_debug_mode.get()
+                                
+                                # Define parcels_dir early so it's available for all code paths
+                                parcels_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels")
+                                parcels_dir.mkdir(parents=True, exist_ok=True)
+                                
+                                # Check capture mode
+                                capture_mode = self._auto_capture_mode.get()  # "manual" or "auto"
+                                
+                                if capture_mode == "auto":
+                                    # ============================================================
+                                    # AUTOMATIC MODE: Detect white popup box automatically
+                                    # ============================================================
+                                    self._root.after(0, lambda: self._parcel_activity_log(f"🤖 Auto-detecting popup..."))
                                     
-                                    # If there's a high concentration of very bright pixels, likely an alert
-                                    if bright_ratio > 0.05:  # More than 5% very bright pixels suggests alert
-                                        log_to_file(f"[Auto Capture] Detected alert popup (bright ratio: {bright_ratio:.3f}), pressing Enter to dismiss")
-                                        pyautogui.press('enter')
-                                        time.sleep(0.5)
-                                        
-                                        # Clear the search field after dismissing alert
-                                        pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.1)
-                                        time.sleep(0.2)
-                                        for _ in range(30):
-                                            pyautogui.press('backspace')
-                                        log_to_file(f"[Auto Capture] Cleared search field after alert dismissal")
-                                        time.sleep(0.5)
-                                except Exception as alert_err:
-                                    log_to_file(f"[Auto Capture] Alert check error: {alert_err}")
-                                
-                                time.sleep(10)  # Wait remaining time for parcel popup to load
-                                
-                                self._root.after(0, lambda: self._parcel_activity_log(f"📸 Capturing screenshot..."))
-                                
-                                # Capture right 80% of screen
-                                screen_w = pyautogui.size()[0]
-                                screen_h = pyautogui.size()[1]
-                                left_x = int(screen_w * 0.20)  # Start at 20% (skip left activity window)
-                                
-                                full_screenshot = ImageGrab.grab(bbox=(left_x, 0, screen_w, screen_h))
-                                
-                                # Find and crop the info popup box by detecting bright white rectangular regions
-                                popup_image = None
-                                try:
+                                    # Capture right 80% of screen (skip left 20% activity window)
+                                    screen_w = pyautogui.size()[0]
+                                    screen_h = pyautogui.size()[1]
+                                    left_x = int(screen_w * 0.20)  # Skip left 20% where activity window is
+                                    
+                                    full_screenshot = ImageGrab.grab(bbox=(left_x, 0, screen_w, screen_h))
+                                    screenshot_w, screenshot_h = full_screenshot.size
+                                    
+                                    # Save DEBUG screenshot
+                                    if debug_mode:
+                                        debug_path = parcels_dir / f"DEBUG_{addr_id}.png"
+                                        full_screenshot.save(debug_path)
+                                        log_to_file(f"[Auto Capture] DEBUG screenshot saved: {debug_path}")
+                                        self._root.after(0, lambda: self._parcel_activity_log(f"📁 DEBUG screenshot saved"))
+                                    
+                                    # Convert to numpy for OpenCV processing
                                     import numpy as np
-                                    from PIL import Image, ImageDraw
                                     import cv2
                                     
-                                    log_to_file(f"[Auto Capture] Starting popup detection for ID {addr_id}")
-                                    
-                                    # Convert to numpy for analysis
                                     img_array = np.array(full_screenshot)
+                                    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
                                     
+                                    # Detect white popup box (white background with content)
                                     # Convert to grayscale
-                                    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+                                    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
                                     
-                                    # Threshold to find very bright regions (white popup boxes)
+                                    # Threshold to find white areas (popup background is white)
                                     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
                                     
                                     # Find contours
                                     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                                     
-                                    log_to_file(f"[Auto Capture] Found {len(contours)} bright regions")
-                                    
-                                    # Look for rectangular contours that match popup size (approx 220x160)
-                                    best_match = None
-                                    best_area_diff = float('inf')
-                                    target_area = 220 * 160
+                                    # Find the best popup candidate
+                                    popup_box = None
+                                    best_score = 0
                                     
                                     for contour in contours:
                                         x, y, w, h = cv2.boundingRect(contour)
                                         area = w * h
                                         
-                                        # Check if size is reasonable for a popup (wider range: 180-280 wide, 120-200 tall)
-                                        if 180 < w < 280 and 120 < h < 200:
-                                            area_diff = abs(area - target_area)
-                                            log_to_file(f"[Auto Capture] Candidate popup at ({x},{y}) size {w}x{h}, area diff: {area_diff}")
-                                            if area_diff < best_area_diff:
-                                                best_area_diff = area_diff
-                                                best_match = (x, y, w, h)
+                                        # Popup characteristics:
+                                        # - Width between 150-400 pixels
+                                        # - Height between 100-300 pixels
+                                        # - Aspect ratio roughly square-ish (0.5 to 2.0)
+                                        # - Located in center-right portion of screen
+                                        
+                                        if 150 <= w <= 400 and 100 <= h <= 300:
+                                            aspect = w / h if h > 0 else 0
+                                            if 0.5 <= aspect <= 2.5:
+                                                # Score based on position (prefer center-right of screen)
+                                                center_x = x + w/2
+                                                center_y = y + h/2
+                                                
+                                                # Prefer popups in the middle vertically and right portion of remaining screen
+                                                x_score = 1.0 if center_x > screenshot_w * 0.3 else 0.5
+                                                y_score = 1.0 if screenshot_h * 0.2 < center_y < screenshot_h * 0.8 else 0.5
+                                                
+                                                # Area score - prefer medium-sized boxes
+                                                area_score = min(area / 50000, 1.0)
+                                                
+                                                score = x_score * y_score * area_score * area
+                                                
+                                                if score > best_score:
+                                                    best_score = score
+                                                    popup_box = (x, y, x + w, y + h)
                                     
-                                    if best_match:
-                                        x, y, w, h = best_match
-                                        popup_image = full_screenshot.crop((x, y, x+w, y+h))
-                                        log_to_file(f"[Auto Capture] ✓ Found popup at ({x},{y}) size {w}x{h}")
+                                    if popup_box:
+                                        x1, y1, x2, y2 = popup_box
+                                        # Add padding
+                                        padding = 5
+                                        x1 = max(0, x1 - padding)
+                                        y1 = max(0, y1 - padding)
+                                        x2 = min(screenshot_w, x2 + padding)
+                                        y2 = min(screenshot_h, y2 + padding)
                                         
-                                        # Save debug image
-                                        debug_img = full_screenshot.copy()
-                                        draw = ImageDraw.Draw(debug_img)
-                                        draw.rectangle([x, y, x+w, y+h], outline="green", width=3)
-                                        debug_path = parcels_dir / f"DEBUG_{addr_id}.png"
-                                        debug_img.save(debug_path)
-                                        log_to_file(f"[Auto Capture] DEBUG saved: {debug_path}")
+                                        popup_image = full_screenshot.crop((x1, y1, x2, y2))
+                                        self._root.after(0, lambda w=x2-x1, h=y2-y1: self._parcel_activity_log(f"✓ Auto-detected: {w}x{h}"))
                                         
-                                        self._root.after(0, lambda: self._parcel_activity_log(f"✓ Found popup box"))
+                                        # ============================================================
+                                        # SMART CONFIRMATION: Show popup for user to confirm or redo
+                                        # ============================================================
+                                        confirm_result = {'action': None}
+                                        confirm_done = threading.Event()
+                                        
+                                        def show_confirmation_dialog():
+                                            """Show detected popup for confirmation"""
+                                            from PIL import Image, ImageTk
+                                            
+                                            conf_dialog = tk.Toplevel()
+                                            conf_dialog.title(f"Confirm Capture - ID: {addr_id}")
+                                            conf_dialog.attributes('-topmost', True)
+                                            conf_dialog.configure(bg="#2C3E50")
+                                            
+                                            # Position at center of screen
+                                            dialog_w, dialog_h = 350, 380
+                                            conf_dialog.update_idletasks()
+                                            screen_width = conf_dialog.winfo_screenwidth()
+                                            screen_height = conf_dialog.winfo_screenheight()
+                                            x = (screen_width - dialog_w) // 2
+                                            y = (screen_height - dialog_h) // 2
+                                            conf_dialog.geometry(f"{dialog_w}x{dialog_h}+{x}+{y}")
+                                            
+                                            # Title
+                                            tk.Label(conf_dialog, text="🤖 Auto-Detected Popup", 
+                                                    font=("Segoe UI", 11, "bold"), bg="#2C3E50", fg="white").pack(pady=5)
+                                            
+                                            tk.Label(conf_dialog, text=f"Address: {address_text[:45]}...", 
+                                                    font=("Segoe UI", 8), bg="#2C3E50", fg="#BDC3C7", wraplength=340).pack(pady=2)
+                                            
+                                            # Image preview in dialog
+                                            preview_frame = tk.Frame(conf_dialog, bg="#1C2833", bd=2, relief="solid")
+                                            preview_frame.pack(pady=10, padx=10, fill="both", expand=True)
+                                            
+                                            # Resize popup_image to fit dialog
+                                            img_w, img_h = popup_image.size
+                                            max_preview_w, max_preview_h = 320, 200
+                                            ratio = min(max_preview_w / img_w, max_preview_h / img_h)
+                                            new_w, new_h = int(img_w * ratio), int(img_h * ratio)
+                                            preview_resized = popup_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                                            
+                                            photo = ImageTk.PhotoImage(preview_resized)
+                                            preview_lbl = tk.Label(preview_frame, image=photo, bg="#1C2833")
+                                            preview_lbl.image = photo  # Keep reference
+                                            preview_lbl.pack(pady=5, padx=5)
+                                            
+                                            # Instructions
+                                            tk.Label(conf_dialog, text="Is this the correct parcel popup?", 
+                                                    font=("Segoe UI", 9), bg="#2C3E50", fg="white").pack(pady=5)
+                                            
+                                            # Buttons
+                                            btn_frame = tk.Frame(conf_dialog, bg="#2C3E50")
+                                            btn_frame.pack(pady=10)
+                                            
+                                            def on_correct():
+                                                confirm_result['action'] = 'correct'
+                                                conf_dialog.destroy()
+                                                confirm_done.set()
+                                            
+                                            def on_redo():
+                                                confirm_result['action'] = 'redo'
+                                                conf_dialog.destroy()
+                                                confirm_done.set()
+                                            
+                                            def on_not_found():
+                                                confirm_result['action'] = 'not_found'
+                                                conf_dialog.destroy()
+                                                confirm_done.set()
+                                            
+                                            def on_skip():
+                                                confirm_result['action'] = 'skip'
+                                                conf_dialog.destroy()
+                                                confirm_done.set()
+                                            
+                                            tk.Button(btn_frame, text="✅ Correct", font=("Segoe UI", 10, "bold"),
+                                                     bg="#27AE60", fg="white", width=10, command=on_correct).pack(side="left", padx=3)
+                                            tk.Button(btn_frame, text="🖱️ Redo", font=("Segoe UI", 10, "bold"),
+                                                     bg="#3498DB", fg="white", width=10, command=on_redo).pack(side="left", padx=3)
+                                            tk.Button(btn_frame, text="❌ Not Found", font=("Segoe UI", 9),
+                                                     bg="#E74C3C", fg="white", width=10, command=on_not_found).pack(side="left", padx=3)
+                                            tk.Button(btn_frame, text="⏭️ Skip", font=("Segoe UI", 9),
+                                                     bg="#95A5A6", fg="white", width=8, command=on_skip).pack(side="left", padx=3)
+                                            
+                                            # Handle window close
+                                            def on_close():
+                                                confirm_result['action'] = 'skip'
+                                                conf_dialog.destroy()
+                                                confirm_done.set()
+                                            conf_dialog.protocol("WM_DELETE_WINDOW", on_close)
+                                        
+                                        # Show confirmation dialog
+                                        self._root.after(0, show_confirmation_dialog)
+                                        
+                                        # Move mouse to center of map area (right 80% of screen, center vertically)
+                                        screen_w_mouse = pyautogui.size()[0]
+                                        screen_h_mouse = pyautogui.size()[1]
+                                        map_center_x = int(screen_w_mouse * 0.20) + int((screen_w_mouse * 0.80) / 2)  # Center of right 80%
+                                        map_center_y = int(screen_h_mouse / 2)  # Center vertically
+                                        pyautogui.moveTo(map_center_x, map_center_y)
+                                        
+                                        confirm_done.wait(timeout=120)  # 2 min timeout
+                                        
+                                        if confirm_result['action'] == 'correct':
+                                            # Save the detected popup
+                                            save_path = parcels_dir / f"parcels_{addr_id}.png"
+                                            popup_image.save(save_path)
+                                            log_to_file(f"[Auto Capture] Saved to {save_path}")
+                                            self._root.after(0, lambda: self._parcel_activity_log(f"✅ Captured ID: {addr_id}"))
+                                            
+                                            # Update preview image
+                                            self._root.after(0, lambda p=str(save_path), i=addr_id: self._update_preview_image(p, i))
+                                            
+                                        elif confirm_result['action'] == 'redo':
+                                            # Switch to manual box drawing
+                                            self._root.after(0, lambda: self._parcel_activity_log(f"🖱️ Redo: Draw box manually..."))
+                                            
+                                            box_result = {'box': None}
+                                            box_done = threading.Event()
+                                            
+                                            def show_redo_overlay():
+                                                """Create transparent overlay for manual selection"""
+                                                overlay = tk.Toplevel()
+                                                overlay.attributes('-fullscreen', True)
+                                                overlay.attributes('-alpha', 0.3)
+                                                overlay.attributes('-topmost', True)
+                                                overlay.configure(bg='gray')
+                                                
+                                                canvas = tk.Canvas(overlay, highlightthickness=0, bg='gray')
+                                                canvas.pack(fill='both', expand=True)
+                                                
+                                                start_x, start_y = [0], [0]
+                                                rect_id = [None]
+                                                
+                                                def on_press(event):
+                                                    start_x[0] = event.x
+                                                    start_y[0] = event.y
+                                                    if rect_id[0]:
+                                                        canvas.delete(rect_id[0])
+                                                    rect_id[0] = canvas.create_rectangle(start_x[0], start_y[0], start_x[0], start_y[0], 
+                                                                                         outline='red', width=3)
+                                                
+                                                def on_drag(event):
+                                                    if rect_id[0]:
+                                                        canvas.coords(rect_id[0], start_x[0], start_y[0], event.x, event.y)
+                                                
+                                                def on_release(event):
+                                                    x1, y1 = start_x[0], start_y[0]
+                                                    x2, y2 = event.x, event.y
+                                                    box_result['box'] = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+                                                    overlay.destroy()
+                                                    box_done.set()
+                                                
+                                                def on_escape(event):
+                                                    box_result['box'] = None
+                                                    overlay.destroy()
+                                                    box_done.set()
+                                                
+                                                canvas.bind('<Button-1>', on_press)
+                                                canvas.bind('<B1-Motion>', on_drag)
+                                                canvas.bind('<ButtonRelease-1>', on_release)
+                                                overlay.bind('<Escape>', on_escape)
+                                                
+                                                tk.Label(overlay, text="🖱️ Click and drag to select parcel popup. Press ESC to cancel.", 
+                                                        font=("Segoe UI", 14, "bold"), bg="yellow", fg="black").place(x=10, y=10)
+                                            
+                                            self._root.after(0, show_redo_overlay)
+                                            box_done.wait(timeout=60)
+                                            
+                                            if box_result['box']:
+                                                rx1, ry1, rx2, ry2 = box_result['box']
+                                                # Adjust for left offset
+                                                rx1_adj = rx1 - left_x
+                                                rx2_adj = rx2 - left_x
+                                                rx1_adj = max(0, rx1_adj)
+                                                rx2_adj = min(screenshot_w, rx2_adj)
+                                                ry1 = max(0, ry1)
+                                                ry2 = min(screenshot_h, ry2)
+                                                
+                                                if rx2_adj > rx1_adj and ry2 > ry1:
+                                                    manual_popup = full_screenshot.crop((rx1_adj, ry1, rx2_adj, ry2))
+                                                    save_path = parcels_dir / f"parcels_{addr_id}.png"
+                                                    manual_popup.save(save_path)
+                                                    self._root.after(0, lambda: self._parcel_activity_log(f"✅ Manual capture saved: {addr_id}"))
+                                                    self._root.after(0, lambda p=str(save_path), i=addr_id: self._update_preview_image(p, i))
+                                            else:
+                                                self._root.after(0, lambda: self._parcel_activity_log(f"⏭️ Manual capture cancelled"))
+                                        
+                                        elif confirm_result['action'] == 'not_found':
+                                            # Mark as not found in database
+                                            log_to_file(f"[Auto Capture] ❌ Marked as not found: {address_text}")
+                                            self._root.after(0, lambda: self._parcel_activity_log(f"❌ Address not found"))
+                                            try:
+                                                error_conn = get_external_db()
+                                                error_cursor = error_conn.cursor()
+                                                error_cursor.execute(
+                                                    "UPDATE google_addresses SET parcel_error = %s WHERE id = %s",
+                                                    ("Address not found", addr_id)
+                                                )
+                                                error_conn.commit()
+                                                error_cursor.close()
+                                                error_conn.close()
+                                            except Exception as db_err:
+                                                log_to_file(f"[Auto Capture] DB error: {db_err}")
+                                        
+                                        # Skip action - just continue to next
+                                        
                                     else:
-                                        log_to_file(f"[Auto Capture] ✗ No popup-sized white box found")
+                                        # Could not detect popup - show confirmation with full screenshot
+                                        self._root.after(0, lambda: self._parcel_activity_log(f"⚠️ No popup detected - showing full screenshot"))
                                         
-                                except ImportError:
-                                    log_to_file(f"[Auto Capture] ERROR: opencv-python not installed. Run: pip install opencv-python")
-                                except Exception as detect_err:
-                                    log_to_file(f"[Auto Capture] Popup detection error: {detect_err}")
-                                    import traceback
-                                    log_to_file(f"[Auto Capture] Traceback: {traceback.format_exc()}")
-                                
-
-                                
-                                # Always save screenshot, but use different filename based on template match
-                                if popup_image:
-                                    # Template matched - save cropped popup with normal name
-                                    save_path = parcels_dir / f"parcels_{addr_id}.png"
-                                    popup_image.save(save_path)
-                                    log_to_file(f"[Auto Capture] Saved popup to {save_path}")
-                                    self._root.after(0, lambda: self._parcel_activity_log(f"✅ Captured popup ID: {addr_id}"))
+                                        # Save full screenshot and show for manual confirmation
+                                        save_path = parcels_dir / f"parcels_{addr_id}.png"
+                                        full_screenshot.save(save_path)
+                                        log_to_file(f"[Auto Capture] No popup detected, saved full: {save_path}")
+                                        self._root.after(0, lambda p=str(save_path), i=addr_id: self._update_preview_image(p, i))
+                                    
+                                    # Clear search field for next address - FAST
+                                    pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.02)
+                                    pyautogui.press('backspace', presses=200, interval=0.005)
+                                    
+                                    # Record capture timing
+                                    if addr_start_time:
+                                        capture_duration = time.time() - addr_start_time
+                                        capture_times.append(capture_duration)
+                                        total_captures += 1
+                                        avg_time = sum(capture_times) / len(capture_times)
+                                        total_elapsed = time.time() - capture_start_time
+                                        elapsed_str = f"{int(total_elapsed//60)}:{int(total_elapsed%60):02d}"
+                                        self._root.after(0, lambda n=total_captures, a=avg_time, e=elapsed_str: 
+                                            self._parcel_activity_log(f"⏱️ {n} caps | Avg: {a:.1f}s | Total: {e}"))
+                                    
                                 else:
-                                    # No template match - save full screenshot with _skipped suffix
-                                    save_path = parcels_dir / f"parcels_{addr_id}_skipped.png"
-                                    full_screenshot.save(save_path)
-                                    log_to_file(f"[Auto Capture] Saved full screenshot (no popup detected) to {save_path}")
-                                    self._root.after(0, lambda: self._parcel_activity_log(f"⚠️ Skipped ID {addr_id}: no popup detected (screenshot saved)"))
-                                
-                                time.sleep(2)  # Brief pause before next capture
+                                    # ============================================================
+                                    # MANUAL MODE: Show dialog for user to draw box or mark error
+                                    # ============================================================
+                                    self._root.after(0, lambda: self._parcel_activity_log(f"🖱️ Draw box around popup or click button..."))
+                                    
+                                    # Create a selection result container
+                                    selection_result = {'action': None, 'box': None}
+                                    selection_done = threading.Event()
+                                    
+                                    def show_selection_dialog():
+                                        """Show a small dialog with options"""
+                                        dialog = tk.Toplevel()
+                                        dialog.title(f"Capture ID: {addr_id}")
+                                        dialog.geometry("300x150")
+                                        dialog.attributes('-topmost', True)
+                                        dialog.configure(bg="#2C3E50")
+                                        
+                                        # Position dialog at center of screen
+                                        dialog.update_idletasks()
+                                        screen_width = dialog.winfo_screenwidth()
+                                        screen_height = dialog.winfo_screenheight()
+                                        x = (screen_width - 300) // 2
+                                        y = (screen_height - 150) // 2
+                                        dialog.geometry(f"300x150+{x}+{y}")
+                                        
+                                        tk.Label(dialog, text=f"Address: {address_text[:40]}...", 
+                                                font=("Segoe UI", 9), bg="#2C3E50", fg="white", wraplength=280).pack(pady=5)
+                                        
+                                        tk.Label(dialog, text="Draw box on screen with mouse, then click 'Capture'\nOR click 'Address Not Found' to skip", 
+                                                font=("Segoe UI", 8), bg="#2C3E50", fg="#BDC3C7", wraplength=280).pack(pady=5)
+                                        
+                                        btn_frame = tk.Frame(dialog, bg="#2C3E50")
+                                        btn_frame.pack(pady=10)
+                                        
+                                        def on_capture():
+                                            selection_result['action'] = 'capture'
+                                            dialog.destroy()
+                                            selection_done.set()
+                                        
+                                        def on_not_found():
+                                            selection_result['action'] = 'not_found'
+                                            dialog.destroy()
+                                            selection_done.set()
+                                        
+                                        def on_double():
+                                            selection_result['action'] = 'double'
+                                            dialog.destroy()
+                                            selection_done.set()
+                                        
+                                        def on_skip():
+                                            selection_result['action'] = 'skip'
+                                            dialog.destroy()
+                                            selection_done.set()
+                                        
+                                        tk.Button(btn_frame, text="📸 Capture", font=("Segoe UI", 9, "bold"),
+                                                 bg="#27AE60", fg="white", command=on_capture).pack(side="left", padx=3)
+                                        tk.Button(btn_frame, text="❌ Not Found", font=("Segoe UI", 9, "bold"),
+                                                 bg="#E74C3C", fg="white", command=on_not_found).pack(side="left", padx=3)
+                                        tk.Button(btn_frame, text="👥 Double", font=("Segoe UI", 9, "bold"),
+                                                 bg="#F39C12", fg="white", command=on_double).pack(side="left", padx=3)
+                                        tk.Button(btn_frame, text="⏭️ Skip", font=("Segoe UI", 9, "bold"),
+                                                 bg="#95A5A6", fg="white", command=on_skip).pack(side="left", padx=3)
+                                        
+                                        # Handle window close
+                                        def on_close():
+                                            selection_result['action'] = 'skip'
+                                            dialog.destroy()
+                                            selection_done.set()
+                                        dialog.protocol("WM_DELETE_WINDOW", on_close)
+                                    
+                                    # Show dialog on main thread
+                                    self._root.after(0, show_selection_dialog)
+                                    
+                                    # Move mouse to center of map area (right 80% of screen)
+                                    screen_w_mouse = pyautogui.size()[0]
+                                    screen_h_mouse = pyautogui.size()[1]
+                                    map_center_x = int(screen_w_mouse * 0.20) + int((screen_w_mouse * 0.80) / 2)  # Center of right 80%
+                                    map_center_y = int(screen_h_mouse / 2)  # Center vertically
+                                    pyautogui.moveTo(map_center_x, map_center_y)
+                                    
+                                    # Wait for user to make a selection (with timeout)
+                                    selection_done.wait(timeout=120)  # 2 minute timeout
+                                    
+                                    if selection_result['action'] == 'not_found':
+                                        # Mark as address not found
+                                        log_to_file(f"[Auto Capture] ❌ User marked as 'Address not found': {address_text}")
+                                        self._root.after(0, lambda a=address_text: self._parcel_activity_log(f"❌ Address not found: {a}"))
+                                        
+                                        try:
+                                            error_conn = get_external_db()
+                                            error_cursor = error_conn.cursor()
+                                            error_cursor.execute(
+                                                "UPDATE google_addresses SET parcel_error = %s WHERE id = %s",
+                                                ("Address not found", addr_id)
+                                            )
+                                            error_conn.commit()
+                                            error_cursor.close()
+                                            error_conn.close()
+                                        except Exception as db_err:
+                                            log_to_file(f"[Auto Capture] Failed to log error to DB: {db_err}")
+                                        
+                                        # Click OK if popup is visible, clear search field - FAST
+                                        pyautogui.press('enter')
+                                        pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.02)
+                                        pyautogui.press('backspace', presses=200, interval=0.005)
+                                        continue
+                                    
+                                    elif selection_result['action'] == 'double':
+                                        # Mark as double address
+                                        log_to_file(f"[Auto Capture] ⚠️ User marked as 'Double address': {address_text}")
+                                        self._root.after(0, lambda a=address_text: self._parcel_activity_log(f"⚠️ Double address: {a}"))
+                                        
+                                        try:
+                                            error_conn = get_external_db()
+                                            error_cursor = error_conn.cursor()
+                                            error_cursor.execute(
+                                                "UPDATE google_addresses SET parcel_error = %s WHERE id = %s",
+                                                ("double address", addr_id)
+                                            )
+                                            error_conn.commit()
+                                            error_cursor.close()
+                                            error_conn.close()
+                                        except Exception as db_err:
+                                            log_to_file(f"[Auto Capture] Failed to log error to DB: {db_err}")
+                                        
+                                        # Clear search field - FAST
+                                        pyautogui.press('escape')
+                                        pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.02)
+                                        pyautogui.press('backspace', presses=200, interval=0.005)
+                                        continue
+                                    
+                                    elif selection_result['action'] == 'skip':
+                                        log_to_file(f"[Auto Capture] ⏭️ User skipped: {address_text}")
+                                        self._root.after(0, lambda a=address_text: self._parcel_activity_log(f"⏭️ Skipped: {a}"))
+                                        
+                                        # Clear search field - FAST
+                                        pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.02)
+                                        pyautogui.press('backspace', presses=200, interval=0.005)
+                                        continue
+                                    
+                                    # User clicked Capture - show overlay for them to draw box FIRST
+                                    self._root.after(0, lambda: self._parcel_activity_log(f"🖱️ Draw box around parcel popup..."))
+                                    
+                                    # Define screen dimensions for later use
+                                    screen_w = pyautogui.size()[0]
+                                    screen_h = pyautogui.size()[1]
+                                    left_x = int(screen_w * 0.20)  # Skip left 20% where activity window is
+                                    
+                                    box_result = {'box': None}
+                                    box_done = threading.Event()
+                                    
+                                    def show_selection_overlay():
+                                        """Create a transparent overlay for mouse selection"""
+                                        overlay = tk.Toplevel()
+                                        overlay.attributes('-fullscreen', True)
+                                        overlay.attributes('-alpha', 0.3)
+                                        overlay.attributes('-topmost', True)
+                                        overlay.configure(bg='gray')
+                                        
+                                        canvas = tk.Canvas(overlay, highlightthickness=0, bg='gray')
+                                        canvas.pack(fill='both', expand=True)
+                                        
+                                        start_x, start_y = [0], [0]
+                                        rect_id = [None]
+                                        
+                                        def on_press(event):
+                                            start_x[0] = event.x
+                                            start_y[0] = event.y
+                                            if rect_id[0]:
+                                                canvas.delete(rect_id[0])
+                                            rect_id[0] = canvas.create_rectangle(start_x[0], start_y[0], start_x[0], start_y[0], 
+                                                                                 outline='red', width=3)
+                                        
+                                        def on_drag(event):
+                                            if rect_id[0]:
+                                                canvas.coords(rect_id[0], start_x[0], start_y[0], event.x, event.y)
+                                        
+                                        def on_release(event):
+                                            x1, y1 = start_x[0], start_y[0]
+                                            x2, y2 = event.x, event.y
+                                            # Normalize coordinates
+                                            box_result['box'] = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+                                            overlay.destroy()
+                                            box_done.set()
+                                        
+                                        def on_escape(event):
+                                            box_result['box'] = None
+                                            overlay.destroy()
+                                            box_done.set()
+                                        
+                                        canvas.bind('<Button-1>', on_press)
+                                        canvas.bind('<B1-Motion>', on_drag)
+                                        canvas.bind('<ButtonRelease-1>', on_release)
+                                        overlay.bind('<Escape>', on_escape)
+                                        
+                                        # Instructions label
+                                        tk.Label(overlay, text="🖱️ Click and drag to select parcel popup area. Press ESC to cancel.", 
+                                                font=("Segoe UI", 14, "bold"), bg="yellow", fg="black").place(x=10, y=10)
+                                    
+                                    # Show overlay on main thread
+                                    self._root.after(0, show_selection_overlay)
+                                    
+                                    # Wait for user to draw box
+                                    box_done.wait(timeout=60)
+                                    
+                                    if box_result['box'] is None:
+                                        self._root.after(0, lambda: self._parcel_activity_log(f"⏭️ Selection cancelled"))
+                                        log_to_file(f"[Auto Capture] Box selection cancelled for ID {addr_id}")
+                                        
+                                        # Clear search field and continue - FAST
+                                        pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.02)
+                                        pyautogui.press('backspace', presses=200, interval=0.005)
+                                        continue
+                                    
+                                    # User drew a box - NOW capture screenshot (after overlay is closed)
+                                    self._root.after(0, lambda: self._parcel_activity_log(f"📸 Capturing..."))
+                                    
+                                    x1, y1, x2, y2 = box_result['box']
+                                    
+                                    # Capture just the selected region directly
+                                    popup_image = ImageGrab.grab(bbox=(x1, y1, x2, y2))
+                                    
+                                    # Save DEBUG screenshot if enabled
+                                    if debug_mode:
+                                        debug_path = parcels_dir / f"DEBUG_{addr_id}.png"
+                                        full_screenshot = ImageGrab.grab(bbox=(left_x, 0, screen_w, screen_h))
+                                        full_screenshot.save(debug_path)
+                                    
+                                    self._root.after(0, lambda w=x2-x1, h=y2-y1: self._parcel_activity_log(f"✓ Captured: {w}x{h}"))
+                                    
+                                    # Save the parcel screenshot
+                                    if popup_image:
+                                        save_path = parcels_dir / f"parcels_{addr_id}.png"
+                                        popup_image.save(save_path)
+                                        self._root.after(0, lambda: self._parcel_activity_log(f"✅ Saved ID: {addr_id}"))
+                                        self._root.after(0, lambda p=str(save_path), i=addr_id: self._update_preview_image(p, i))
+                                    
+                                    # IMMEDIATELY clear search field and prep for next address - NO DELAYS
+                                    pyautogui.click(search_field_x, search_field_y, clicks=3, interval=0.02)
+                                    pyautogui.press('backspace', presses=200, interval=0.005)
+                                    
+                                    # Record capture timing
+                                    if addr_start_time:
+                                        capture_duration = time.time() - addr_start_time
+                                        capture_times.append(capture_duration)
+                                        total_captures += 1
+                                        avg_time = sum(capture_times) / len(capture_times)
+                                        total_elapsed = time.time() - capture_start_time
+                                        elapsed_str = f"{int(total_elapsed//60)}:{int(total_elapsed%60):02d}"
+                                        self._root.after(0, lambda n=total_captures, a=avg_time, e=elapsed_str: 
+                                            self._parcel_activity_log(f"⏱️ {n} caps | Avg: {a:.1f}s | Total: {e}"))
+                                    # NO pause before next iteration - loop will handle next address
                                 
                             except Exception as capture_err:
                                 log_to_file(f"[Auto Capture] Capture error: {capture_err}")
@@ -7860,6 +9221,16 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             break
                     
                     log_to_file("[Auto Capture] Workflow stopped")
+                    
+                    # Show final timing summary
+                    if total_captures > 0:
+                        total_elapsed = time.time() - capture_start_time
+                        avg_time = sum(capture_times) / len(capture_times)
+                        elapsed_str = f"{int(total_elapsed//60)}:{int(total_elapsed%60):02d}"
+                        summary = f"⏱️ DONE: {total_captures} captures in {elapsed_str} (avg {avg_time:.1f}s/cap)"
+                        self._root.after(0, lambda s=summary: self._parcel_activity_log(s))
+                        log_to_file(f"[Auto Capture] {summary}")
+                    
                     self._root.after(0, lambda: self._parcel_activity_log("⏸️ Auto Capture stopped"))
                     self._root.after(0, lambda: self._safe_stats_update('status', text="⏸️ Stopped"))
                     
@@ -7879,6 +9250,2813 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
             threading.Thread(target=_run_auto_capture, daemon=True).start()
         
         self._start_auto_capture = _start_auto_capture
+        
+        # ========== WEBSITES AUTO CAPTURE IMPLEMENTATION ==========
+        def _open_websites_folder():
+            """Open the Websites captures folder in explorer"""
+            import subprocess
+            websites_path = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites")
+            websites_path.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(f'explorer "{websites_path}"')
+        
+        self._open_websites_folder = _open_websites_folder
+        
+        def _start_websites_auto_capture():
+            """Start automated website screenshot capture workflow"""
+            log_to_file("[Websites Auto Capture] Button clicked")
+            
+            # Toggle running state
+            if self._websites_auto_capture_running:
+                log_to_file("[Websites Auto Capture] Stopping...")
+                self._websites_auto_capture_running = False
+                self._websites_auto_capture_btn.config(text="🌐 Auto Capture", bg="#9B59B6")
+                return
+            
+            root = self._root
+            
+            # Minimize Queue Poller window
+            try:
+                root.iconify()
+            except Exception as _:
+                pass
+            
+            log_to_file("[Websites Auto Capture] Starting automated capture workflow")
+            self._websites_auto_capture_running = True
+            self._websites_auto_capture_paused = False
+            self._websites_auto_capture_btn.config(text="⏸️ Stop", bg="#E74C3C")
+            
+            # Import ttk for combobox
+            from tkinter import ttk
+            
+            # Create Websites Activity Window
+            activity_win = tk.Toplevel(root)
+            activity_win.title("Websites Auto Capture")
+            self._websites_activity_win = activity_win
+            
+            # Allow close anytime - will stop capture
+            def on_close_attempt():
+                # Stop any running capture
+                self._websites_auto_capture_running = False
+                self._websites_auto_capture_paused = False
+                try:
+                    activity_win.destroy()
+                except:
+                    pass
+                self._websites_activity_win = None
+                self._websites_auto_capture_btn.config(text="🌐 Auto Capture", bg="#9B59B6")
+                # Restore Queue Poller window
+                try:
+                    root.deiconify()
+                    root.state('normal')
+                    root.lift()
+                    root.focus_force()
+                except:
+                    pass
+            
+            activity_win.protocol("WM_DELETE_WINDOW", on_close_attempt)
+            activity_win.resizable(True, True)  # Allow resizing
+            
+            # Get profile manager for window size
+            profile_mgr = get_profile_manager()
+            screen_w = activity_win.winfo_screenwidth()
+            screen_h = activity_win.winfo_screenheight()
+            
+            # 20% width, 95% height, left edge
+            win_w = int(screen_w * 0.20)
+            win_h = int(screen_h * 0.95)
+            x_pos = 0
+            y_pos = 0
+            
+            activity_win.geometry(f"{win_w}x{win_h}+{x_pos}+{y_pos}")
+            activity_win.configure(bg="#2C3E50")
+            log_to_file("[Websites Auto Capture] Window geometry set and configured")
+            
+            # === AUTO SETTINGS: Load/Save Auto checkbox states ===
+            import json as auto_json  # Local import for settings
+            auto_settings_file = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites\auto_settings.json")
+            
+            # Store coordinates (will be loaded from settings)
+            singlefile_coords = {'click1_x': 1177, 'click1_y': 47, 'click2_x': 1177, 'click2_y': 178}
+            divsnapper_coords = {'click1_x': 1205, 'click1_y': 45, 'click2_x': 1205, 'click2_y': 78}
+            
+            def load_auto_settings():
+                """Load Auto checkbox states from JSON file"""
+                defaults = {
+                    'auto_method': False,
+                    'auto_singlefile': False,
+                    'auto_take_image': False,
+                    'auto_json': False,
+                    'auto_next': False,
+                    'singlefile_coords': {'click1_x': 1177, 'click1_y': 47, 'click2_x': 1177, 'click2_y': 178},
+                    'divsnapper_coords': {'click1_x': 1205, 'click1_y': 45, 'click2_x': 1205, 'click2_y': 78}
+                }
+                try:
+                    if auto_settings_file.exists():
+                        with open(auto_settings_file, 'r') as f:
+                            saved = auto_json.load(f)
+                            defaults.update(saved)
+                except Exception as e:
+                    log_to_file(f"[Auto Settings] Load error: {e}")
+                return defaults
+            
+            def save_auto_settings():
+                """Save Auto checkbox states to JSON file"""
+                try:
+                    settings = {
+                        'auto_method': auto_method_var.get(),
+                        'auto_singlefile': auto_singlefile_var.get(),
+                        'auto_take_image': auto_take_image_var.get(),
+                        'auto_json': auto_json_var.get(),
+                        'auto_next': auto_next_var.get(),
+                        'singlefile_coords': singlefile_coords,
+                        'divsnapper_coords': divsnapper_coords
+                    }
+                    auto_settings_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(auto_settings_file, 'w') as f:
+                        auto_json.dump(settings, f, indent=2)
+                    log_to_file(f"[Auto Settings] Saved: {settings}")
+                except Exception as e:
+                    log_to_file(f"[Auto Settings] Save error: {e}")
+            
+            # Load settings
+            auto_settings = load_auto_settings()
+            
+            # Load coordinates from settings
+            singlefile_coords.update(auto_settings.get('singlefile_coords', {}))
+            divsnapper_coords.update(auto_settings.get('divsnapper_coords', {}))
+            
+            # Create variables for Auto checkboxes
+            auto_method_var = tk.BooleanVar(value=auto_settings.get('auto_method', False))
+            auto_singlefile_var = tk.BooleanVar(value=auto_settings.get('auto_singlefile', False))
+            auto_take_image_var = tk.BooleanVar(value=auto_settings.get('auto_take_image', False))
+            auto_json_var = tk.BooleanVar(value=auto_settings.get('auto_json', False))
+            auto_next_var = tk.BooleanVar(value=auto_settings.get('auto_next', False))
+            
+            # Bind save on change
+            auto_method_var.trace_add('write', lambda *args: save_auto_settings())
+            auto_singlefile_var.trace_add('write', lambda *args: save_auto_settings())
+            auto_take_image_var.trace_add('write', lambda *args: save_auto_settings())
+            auto_json_var.trace_add('write', lambda *args: save_auto_settings())
+            auto_next_var.trace_add('write', lambda *args: save_auto_settings())
+            
+            log_to_file(f"[Auto Settings] Loaded: method={auto_method_var.get()}, singlefile={auto_singlefile_var.get()}, take_image={auto_take_image_var.get()}, json={auto_json_var.get()}, next={auto_next_var.get()}")
+            
+            # ===== HEADER with Close button =====
+            header_frame = tk.Frame(activity_win, bg="#2C3E50")
+            header_frame.pack(fill="x", padx=5, pady=(5, 0))
+            
+            tk.Label(header_frame, text="Websites Auto Capture", font=("Segoe UI", 10, "bold"),
+                    bg="#2C3E50", fg="#ECF0F1").pack(side="left", padx=5)
+            
+            close_btn = tk.Button(header_frame, text="❌ Close", bg="#E74C3C", fg="white",
+                                 font=("Segoe UI", 8, "bold"), padx=8, pady=2,
+                                 cursor="hand2", relief="raised",
+                                 command=on_close_attempt)
+            close_btn.pack(side="right", padx=5)
+            
+            # ===== TOP: Extraction Fields Display =====
+            extraction_frame = tk.Frame(activity_win, bg="#1C2833", relief="ridge", bd=1)
+            extraction_frame.pack(fill="x", padx=5, pady=5)
+            log_to_file("[Websites Auto Capture] Extraction frame created and packed")
+            
+            # Radio button selection for extraction method
+            extraction_method_var = tk.StringVar(value="manual")
+            log_to_file("[Websites Auto Capture] Extraction method var created")
+            
+            radio_container = tk.Frame(extraction_frame, bg="#1C2833")
+            radio_container.pack(anchor="w", padx=5, pady=(5, 5))
+            log_to_file("[Websites Auto Capture] Radio container created and packed")
+            
+            def on_method_change():
+                try:
+                    selected = extraction_method_var.get()
+                    print(f"[DEBUG] on_method_change called! selected={selected}")
+                    log_to_file(f"[Websites Auto Capture] Method changed to: {selected}")
+                    log_to_file(f"[Websites Auto Capture] current_site_id = {getattr(on_method_change, 'current_site_id', 'NOT SET')}")
+                    log_to_file(f"[Websites Auto Capture] current_site_url = {getattr(on_method_change, 'current_site_url', 'NOT SET')}")
+                    
+                    # Update extraction_method in database when radio button is clicked
+                    site_id = getattr(on_method_change, 'current_site_id', None)
+                    if site_id:
+                        log_to_file(f"[Websites Auto Capture] Attempting DB update for gp_id={site_id}")
+                        try:
+                            from config_utils import get_external_db
+                            log_to_file(f"[Websites Auto Capture] Getting DB connection...")
+                            db_conn = get_external_db()
+                            log_to_file(f"[Websites Auto Capture] DB connection obtained: {db_conn}")
+                            db_cursor = db_conn.cursor()
+                            
+                            # Map radio value to database value
+                            method_map = {'manual': 'html', 'image': 'image', 'headless': 'headless'}
+                            db_method = method_map.get(selected, selected)
+                            log_to_file(f"[Websites Auto Capture] Mapped method: {selected} -> {db_method}")
+                            
+                            # Get google_addresses_id from google_places
+                            db_cursor.execute("SELECT google_addresses_id FROM google_places WHERE id = %s", (site_id,))
+                            ga_result = db_cursor.fetchone()
+                            google_addresses_id = ga_result[0] if ga_result else None
+                            log_to_file(f"[Websites Auto Capture] google_addresses_id for gp_id={site_id}: {google_addresses_id}")
+                            
+                            # Update google_addresses.extraction_method only
+                            ga_rows = 0
+                            if google_addresses_id:
+                                sql_ga = f"UPDATE google_addresses SET extraction_method = '{db_method}' WHERE id = {google_addresses_id}"
+                                log_to_file(f"[Websites Auto Capture] Executing SQL (google_addresses): {sql_ga}")
+                                
+                                db_cursor.execute("""
+                                    UPDATE google_addresses 
+                                    SET extraction_method = %s
+                                    WHERE id = %s
+                                """, (db_method, google_addresses_id))
+                                ga_rows = db_cursor.rowcount
+                                log_to_file(f"[Websites Auto Capture] google_addresses updated, rows affected: {ga_rows}")
+                            else:
+                                log_to_file(f"[Websites Auto Capture] No google_addresses_id linked, skipping update")
+                            
+                            db_conn.commit()
+                            log_to_file(f"[Websites Auto Capture] Commit successful")
+                            
+                            db_cursor.close()
+                            db_conn.close()
+                            log_to_file(f"[Websites Auto Capture] ✓ Updated extraction_method={db_method} for ga_id={google_addresses_id}")
+                            self._root.after(0, lambda m=db_method, ga=google_addresses_id, gar=ga_rows: 
+                                log_activity(f"   📝 DB: extraction_method = {m} (ga_id:{ga} {gar} rows)"))
+                        except Exception as db_err:
+                            import traceback
+                            log_to_file(f"[Websites Auto Capture] ✗ Failed to update extraction_method: {db_err}")
+                            log_to_file(f"[Websites Auto Capture] Traceback: {traceback.format_exc()}")
+                            self._root.after(0, lambda e=str(db_err): log_activity(f"   ❌ DB Error: {e[:50]}"))
+                    else:
+                        log_to_file(f"[Websites Auto Capture] No current_site_id set, skipping DB update")
+                except Exception as e:
+                    import traceback
+                    print(f"[DEBUG] on_method_change ERROR: {e}")
+                    log_to_file(f"[Websites Auto Capture] on_method_change exception: {e}")
+                    log_to_file(f"[Websites Auto Capture] Traceback: {traceback.format_exc()}")
+                
+                # NOTE: Don't open browser here - browser is already open from the capture loop
+                # Just update the method, the main loop handles the browser
+            
+            # Store current site URL and ID for radio button handler (after function definition)
+            on_method_change.current_site_url = None
+            on_method_change.current_site_id = None
+            
+            # === STEP 1: Method ===
+            step1_frame = tk.Frame(extraction_frame, bg="#1C2833", relief="solid", bd=1)
+            step1_frame.pack(fill="x", padx=5, pady=2)
+            step1_header = tk.Frame(step1_frame, bg="#1C2833")
+            step1_header.pack(fill="x", pady=2)
+            tk.Label(step1_header, text="1️⃣ Method", font=("Segoe UI", 9, "bold"), 
+                    bg="#1C2833", fg="#3498DB").pack(side="left", padx=5)
+            
+            def open_browser_80_percent():
+                """Open Chrome at 80% width on right side with 75% zoom"""
+                import subprocess
+                import pyautogui
+                
+                print("[DEBUG] open_browser_80_percent CALLED!")
+                log_to_file("[Open Browser] Opening Chrome at 80% width, 75% zoom...")
+                
+                try:
+                    # Get screen dimensions
+                    screen_w = pyautogui.size()[0]
+                    screen_h = pyautogui.size()[1]
+                    
+                    # Calculate position: right 80% of screen
+                    x_pos = int(screen_w * 0.20)  # Start at 20% from left
+                    win_w = int(screen_w * 0.80)  # 80% width
+                    win_h = screen_h
+                    
+                    # Launch Chrome with position and size
+                    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+                    subprocess.Popen([
+                        chrome_path,
+                        f"--window-position={x_pos},0",
+                        f"--window-size={win_w},{win_h}",
+                        "--force-device-scale-factor=0.75",
+                        "--safebrowsing-disable-download-protection",
+                        "--disable-features=SafeBrowsingEnhancedProtection",
+                        "about:blank"
+                    ])
+                    
+                    log_to_file(f"[Open Browser] Chrome launched at x={x_pos}, w={win_w}, h={win_h}")
+                    try:
+                        log_activity("🌐 Browser opened (80% right, 75% zoom)")
+                    except:
+                        pass
+                except Exception as e:
+                    log_to_file(f"[Open Browser] Error: {e}")
+                    print(f"[DEBUG] Open Browser error: {e}")
+            
+            open_browser_btn = tk.Button(step1_header, text="🌐 Open Browser", bg="#27AE60", fg="white",
+                                        font=("Segoe UI", 7, "bold"), padx=5, pady=1, relief="flat",
+                                        command=open_browser_80_percent)
+            open_browser_btn.pack(side="right", padx=2)
+            
+            auto_method_cb = tk.Checkbutton(step1_header, text="Auto", variable=auto_method_var,
+                                           font=("Segoe UI", 7), bg="#1C2833", fg="#F39C12",
+                                           selectcolor="#1C2833", activebackground="#1C2833")
+            auto_method_cb.pack(side="right", padx=5)
+            
+            # Row 1: Headless
+            row1 = tk.Frame(step1_frame, bg="#1C2833")
+            row1.pack(anchor="w", pady=2, padx=10)
+            tk.Radiobutton(row1, text="🤖 Headless", variable=extraction_method_var, value="headless",
+                          font=("Segoe UI", 8), bg="#1C2833", fg="#ECF0F1", 
+                          selectcolor="#1C2833", activebackground="#1C2833",
+                          command=on_method_change).pack(side="left")
+            coords_headless = tk.Label(row1, text="", font=("Segoe UI", 7), bg="#1C2833", fg="#95A5A6")
+            coords_headless.pack(side="left", padx=(5, 0))
+            
+            # Row 2: Manual HTML
+            row2 = tk.Frame(step1_frame, bg="#1C2833")
+            row2.pack(anchor="w", pady=2, padx=10)
+            tk.Radiobutton(row2, text="💾 HTML", variable=extraction_method_var, value="manual",
+                          font=("Segoe UI", 8), bg="#1C2833", fg="#ECF0F1",
+                          selectcolor="#1C2833", activebackground="#1C2833",
+                          command=on_method_change).pack(side="left")
+            coords_manual = tk.Label(row2, text="", font=("Segoe UI", 7), bg="#1C2833", fg="#95A5A6")
+            coords_manual.pack(side="left", padx=(5, 0))
+            
+            # Row 3: Screenshot
+            row3 = tk.Frame(step1_frame, bg="#1C2833")
+            row3.pack(anchor="w", pady=2, padx=10)
+            tk.Radiobutton(row3, text="📸 Image", variable=extraction_method_var, value="image",
+                          font=("Segoe UI", 8), bg="#1C2833", fg="#ECF0F1",
+                          selectcolor="#1C2833", activebackground="#1C2833",
+                          command=on_method_change).pack(side="left")
+            coords_image = tk.Label(row3, text="", font=("Segoe UI", 7), bg="#1C2833", fg="#95A5A6")
+            coords_image.pack(side="left", padx=(5, 0))
+            log_to_file("[Websites Auto Capture] All 3 radio button rows created successfully")
+            
+            # === STEP 2: SingleFile ===
+            step2_frame = tk.Frame(extraction_frame, bg="#1C2833", relief="solid", bd=1)
+            step2_frame.pack(fill="x", padx=5, pady=2)
+            step2_header = tk.Frame(step2_frame, bg="#1C2833")
+            step2_header.pack(fill="x", pady=2)
+            tk.Label(step2_header, text="2️⃣ SingleFile", font=("Segoe UI", 9, "bold"), 
+                    bg="#1C2833", fg="#3498DB").pack(side="left", padx=5)
+            auto_take_image_cb = tk.Checkbutton(step2_header, text="Auto", variable=auto_take_image_var,
+                                               font=("Segoe UI", 7), bg="#1C2833", fg="#F39C12",
+                                               selectcolor="#1C2833", activebackground="#1C2833")
+            auto_take_image_cb.pack(side="right", padx=5)
+            
+            # Current building info
+            current_building_lbl = tk.Label(step2_frame,
+                text="ID: -- | Building: --",
+                font=("Segoe UI", 8, "bold"), bg="#1C2833", fg="#E74C3C")
+            current_building_lbl.pack(pady=(0, 2))
+            log_to_file("[Websites Auto Capture] Current building label created")
+            
+            # Coordinate display row
+            coord_row = tk.Frame(step2_frame, bg="#1C2833")
+            coord_row.pack(fill="x", pady=(0, 3), padx=5)
+            
+            coord_display_lbl = tk.Label(coord_row,
+                text="x: -- | y: --",
+                font=("Segoe UI", 8), bg="#1C2833", fg="#F39C12")
+            coord_display_lbl.pack(side="left", padx=5)
+            
+            # Rerun coords button (next to coords display)
+            def rerun_coords_only():
+                """Just wait for user to click and record coordinates"""
+                if not hasattr(on_method_change, 'current_site_id') or not on_method_change.current_site_id:
+                    log_activity("⚠️ No website loaded yet")
+                    return
+                
+                import threading
+                def record_coord():
+                    try:
+                        import pyautogui
+                        from pynput import mouse
+                        
+                        site_id = on_method_change.current_site_id
+                        log_to_file(f"[Rerun Coords] Starting for site ID: {site_id}")
+                        self._root.after(0, lambda: log_activity("🎯 Click anywhere to record coords..."))
+                        self._root.after(0, lambda: rerun_coords_btn.config(text="🎯 Click...", bg="#F39C12"))
+                        
+                        coord_result = {'x': None, 'y': None, 'captured': False}
+                        
+                        def on_click(x, y, button, pressed):
+                            if pressed and not coord_result['captured']:
+                                coord_result['x'] = x
+                                coord_result['y'] = y
+                                coord_result['captured'] = True
+                                return False
+                        
+                        with mouse.Listener(on_click=on_click) as listener:
+                            listener.join()
+                        
+                        if coord_result['captured']:
+                            x, y = coord_result['x'], coord_result['y']
+                            self._root.after(0, lambda: log_activity(f"✅ Coords: ({x}, {y})"))
+                            self._root.after(0, lambda: coord_display_lbl.config(text=f"✅ x: {x} | y: {y}", fg="#27AE60"))
+                            
+                            # Save to database
+                            try:
+                                temp_db = get_external_db()
+                                temp_cursor = temp_db.cursor()
+                                temp_cursor.execute("""
+                                    UPDATE google_places 
+                                    SET click_coords_x = %s, click_coords_y = %s
+                                    WHERE id = %s
+                                """, (x, y, site_id))
+                                temp_db.commit()
+                                temp_cursor.close()
+                                temp_db.close()
+                                self._root.after(0, lambda: log_activity("💾 Coords saved to DB"))
+                            except Exception as db_err:
+                                log_to_file(f"[Rerun Coords] DB error: {db_err}")
+                            
+                            self._root.after(0, lambda: rerun_coords_btn.config(text="🎯 Rerun", bg="#16A085"))
+                        else:
+                            self._root.after(0, lambda: rerun_coords_btn.config(text="🎯 Rerun", bg="#16A085"))
+                    except Exception as e:
+                        log_to_file(f"[Rerun Coords] Error: {e}")
+                        self._root.after(0, lambda: rerun_coords_btn.config(text="🎯 Rerun", bg="#16A085"))
+                
+                threading.Thread(target=record_coord, daemon=True).start()
+            
+            rerun_coords_btn = tk.Button(coord_row, text="🎯 Rerun", bg="#16A085", fg="white",
+                                        font=("Segoe UI", 7, "bold"), padx=5, pady=1, relief="flat",
+                                        command=rerun_coords_only)
+            rerun_coords_btn.pack(side="left", padx=2)
+            
+            # Buttons frame for action buttons
+            coord_frame = tk.Frame(step2_frame, bg="#1C2833")
+            coord_frame.pack(pady=(0, 5))
+            log_to_file("[Websites Auto Capture] Coordinate frame created")
+            
+            # Store recorded coordinates
+            recorded_coords = {'x': None, 'y': None, 'recording': False}
+            
+            def run_singlefile_and_record():
+                """Run SingleFile automation (2 clicks), then wait for user to position mouse and click to record coords"""
+                print("[DEBUG] run_singlefile_and_record CALLED!")
+                log_to_file("[SingleFile Button] Button clicked!")
+                try:
+                    log_activity("💾 SingleFile button clicked...")
+                except Exception as e:
+                    print(f"[DEBUG] log_activity error: {e}")
+                if not hasattr(on_method_change, 'current_site_id') or not on_method_change.current_site_id:
+                    try:
+                        log_activity("⚠️ No website loaded yet")
+                    except:
+                        pass
+                    return
+                
+                import threading
+                def automation_then_record():
+                    try:
+                        import pyautogui
+                        from pathlib import Path
+                        
+                        site_id = on_method_change.current_site_id
+                        log_to_file(f"[SingleFile Step 2] Running for site ID: {site_id}")
+                        self._root.after(0, lambda: log_activity("💾 Running SingleFile clicks..."))
+                        
+                        # Step 1: Right-click at configurable coords
+                        c1x, c1y = singlefile_coords['click1_x'], singlefile_coords['click1_y']
+                        log_to_file(f"[SingleFile Step 2] Click 1: Right-clicking at ({c1x}, {c1y})...")
+                        self._root.after(0, lambda: log_activity(f"🖱️ Click 1: Right-click at ({c1x}, {c1y})..."))
+                        pyautogui.moveTo(c1x, c1y, duration=0.3)
+                        time.sleep(0.2)
+                        pyautogui.rightClick()
+                        time.sleep(0.5)
+                        
+                        # Step 2: Click at configurable coords
+                        c2x, c2y = singlefile_coords['click2_x'], singlefile_coords['click2_y']
+                        log_to_file(f"[SingleFile Step 2] Click 2: Clicking ({c2x}, {c2y})...")
+                        self._root.after(0, lambda: log_activity(f"🖱️ Click 2: Click menu at ({c2x}, {c2y})..."))
+                        pyautogui.click(c2x, c2y)
+                        time.sleep(1)
+                        
+                        # In manual mode (single button click), ALWAYS let user record coords
+                        # Auto-use saved coords only happens in auto_capture_mode
+                        stored_x = None
+                        stored_y = None
+                        # Only check for existing coords if we're in auto-capture mode (not manual button click)
+                        if hasattr(on_method_change, 'auto_capture_mode') and on_method_change.auto_capture_mode:
+                            try:
+                                temp_db_conn = get_external_db()
+                                temp_db_cursor = temp_db_conn.cursor()
+                                temp_db_cursor.execute("""
+                                    SELECT click_coords_x, click_coords_y 
+                                    FROM google_places 
+                                    WHERE id = %s
+                                """, (site_id,))
+                                result = temp_db_cursor.fetchone()
+                                if result and result[0] and result[1]:
+                                    stored_x, stored_y = result[0], result[1]
+                                    log_to_file(f"[SingleFile Step 2] Found existing coords: ({stored_x}, {stored_y})")
+                                temp_db_cursor.close()
+                                temp_db_conn.close()
+                            except Exception as db_err:
+                                log_to_file(f"[SingleFile Step 2] DB coord check error: {db_err}")
+                        
+                        if stored_x and stored_y:
+                            # Coords exist - use them directly
+                            log_to_file(f"[SingleFile Step 2] Using existing coords: ({stored_x}, {stored_y})")
+                            self._root.after(0, lambda: log_activity(f"✅ Using saved coords: ({stored_x}, {stored_y})"))
+                            self._root.after(0, lambda: coord_display_lbl.config(text=f"✅ x: {stored_x} | y: {stored_y}", fg="#27AE60"))
+                            
+                            # Move to coords and click
+                            pyautogui.moveTo(stored_x, stored_y, duration=0.3)
+                            time.sleep(0.5)
+                            pyautogui.click()
+                            self._root.after(0, lambda: log_activity("💾 Clicking save button..."))
+                            
+                            # Continue with download wait (skip to download section)
+                            log_to_file(f"[SingleFile Step 2] Waiting for download...")
+                            self._root.after(0, lambda: log_activity("⏳ Waiting for download..."))
+                        else:
+                            # No coords - start coordinate recording
+                            log_to_file(f"[SingleFile Step 2] Waiting for user to position mouse and click...")
+                            self._root.after(0, lambda: log_activity("🎯 Move mouse to save button and click..."))
+                            self._root.after(0, lambda: singlefile_btn.config(text="🎯 Waiting for click...", bg="#F39C12"))
+                            
+                            recorded_coords['recording'] = True
+                            
+                            # Track mouse position
+                            def track_mouse():
+                                if recorded_coords['recording']:
+                                    x, y = pyautogui.position()
+                                    self._root.after(0, lambda: coord_display_lbl.config(text=f"x: {x} | y: {y}"))
+                                    self._root.after(50, track_mouse)  # Update every 50ms
+                            
+                            self._root.after(0, track_mouse)
+                            
+                            # Listen for click
+                            def on_click(x, y, button, pressed):
+                                if pressed and recorded_coords['recording']:
+                                    recorded_coords['x'] = x
+                                    recorded_coords['y'] = y
+                                    recorded_coords['recording'] = False
+                                    
+                                    # Update UI
+                                    self._root.after(0, lambda: singlefile_btn.config(text="✅ Coords Recorded", bg="#27AE60"))
+                                    self._root.after(0, lambda: coord_display_lbl.config(text=f"✅ x: {x} | y: {y}", fg="#27AE60"))
+                                    self._root.after(0, lambda: log_activity(f"✅ Coordinates recorded: ({x}, {y})"))
+                                    
+                                    # Update the appropriate coords label based on selected method
+                                    selected = extraction_method_var.get()
+                                    if selected == "headless":
+                                        self._root.after(0, lambda: coords_headless.config(text=f"({x}, {y})", fg="#27AE60"))
+                                    elif selected == "manual":
+                                        self._root.after(0, lambda: coords_manual.config(text=f"({x}, {y})", fg="#27AE60"))
+                                    elif selected == "image":
+                                        self._root.after(0, lambda: coords_image.config(text=f"({x}, {y})", fg="#27AE60"))
+                                    
+                                    # Save to database
+                                    if hasattr(on_method_change, 'current_site_id') and on_method_change.current_site_id:
+                                        try:
+                                            temp_db_conn = get_external_db()
+                                            temp_db_cursor = temp_db_conn.cursor()
+                                            temp_db_cursor.execute("""
+                                                UPDATE google_places 
+                                                SET click_coords_x = %s, click_coords_y = %s
+                                                WHERE id = %s
+                                            """, (x, y, on_method_change.current_site_id))
+                                            temp_db_conn.commit()
+                                            temp_db_cursor.close()
+                                            temp_db_conn.close()
+                                            self._root.after(0, lambda: log_activity(f"💾 Coords saved to database"))
+                                        except Exception as db_err:
+                                            log_to_file(f"[Coords Save] DB error: {db_err}")
+                                    
+                                    # After recording coords, complete the save by clicking
+                                    log_to_file(f"[SingleFile Step 2] Clicking save button at ({x}, {y})...")
+                                    self._root.after(0, lambda: log_activity("💾 Clicking save button..."))
+                                    pyautogui.click()
+                                    
+                                    # Wait for download
+                                    log_to_file(f"[SingleFile Step 2] Waiting for download...")
+                                    self._root.after(0, lambda: log_activity("⏳ Waiting for download..."))
+                                    return False  # Stop listener
+                            
+                            # Start mouse listener
+                            from pynput import mouse
+                            listener = mouse.Listener(on_click=on_click)
+                            listener.start()
+                        
+                        # Wait for download (common for both paths)
+                        downloads_folder = Path.home() / "Downloads"
+                        websites_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites")
+                        
+                        max_wait = 30
+                        wait_interval = 1
+                        waited = 0
+                        latest_file = None
+                        
+                        while waited < max_wait:
+                            time.sleep(wait_interval)
+                            waited += wait_interval
+                            
+                            html_files = list(downloads_folder.glob("*.html")) + list(downloads_folder.glob("*.htm"))
+                            if html_files:
+                                potential_file = max(html_files, key=lambda f: f.stat().st_mtime)
+                                import time as time_module
+                                file_age = time_module.time() - potential_file.stat().st_mtime
+                                if file_age < 10:
+                                    latest_file = potential_file
+                                    log_to_file(f"[SingleFile Step 2] Found file: {latest_file.name}")
+                                    break
+                            
+                            if waited % 5 == 0:
+                                self._root.after(0, lambda w=waited: log_activity(f"⏳ Still waiting... ({w}s)"))
+                        
+                        # Save with timestamp and extract data
+                        import shutil
+                        from datetime import datetime
+                        
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        timestamped_filename = f"gp_{site_id}_{timestamp}.html"
+                        destination = websites_dir / timestamped_filename
+                        
+                        if latest_file:
+                            shutil.move(str(latest_file), str(destination))
+                            self._root.after(0, lambda: log_activity(f"✅ HTML saved as {timestamped_filename}"))
+                        else:
+                            # Check if base HTML exists and use it
+                            base_html = websites_dir / f"{site_id}.html"
+                            if base_html.exists():
+                                shutil.copy(str(base_html), str(destination))
+                                self._root.after(0, lambda: log_activity(f"📋 Using existing HTML as {timestamped_filename}"))
+                            else:
+                                self._root.after(0, lambda: log_activity("⚠️ No HTML file found"))
+                        
+                        # Only run immediate JSON extraction if BeautifulSoup is selected
+                        # OpenAI extraction is batched (runs when 20+ files via Process AI button)
+                        method = json_extraction_var.get()
+                        
+                        if destination.exists() and method == 'beautifulsoup':
+                            self._root.after(0, lambda: log_activity("🔍 Extracting data from HTML..."))
+                            log_to_file(f"[SingleFile Step 2] Starting BeautifulSoup extraction...")
+                            self._root.after(0, lambda: log_activity(f"📊 Using beautifulsoup extraction..."))
+                            
+                            # Get the URL from current site
+                            current_url = on_method_change.current_site_url if hasattr(on_method_change, 'current_site_url') else ''
+                            
+                            # Extract data with BeautifulSoup
+                            try:
+                                    from bs4 import BeautifulSoup
+                                    import json
+                                    import base64
+                                    
+                                    with open(destination, 'r', encoding='utf-8') as f:
+                                        soup = BeautifulSoup(f.read(), 'html.parser')
+                                    
+                                    # Extract details
+                                    data = {
+                                        'site_id': site_id,
+                                        'timestamp': timestamp,
+                                        'url': current_url,
+                                        'title': soup.title.string if soup.title else '',
+                                        'text_content': soup.get_text()[:5000],  # First 5000 chars
+                                        'links': [a.get('href') for a in soup.find_all('a', href=True)][:50],
+                                        'images': [],
+                                        'thumbnail': None
+                                    }
+                                    
+                                    # Extract thumbnail (first significant image)
+                                    for img in soup.find_all('img'):
+                                        src = img.get('src', '')
+                                        if src and ('data:image' in src or 'http' in src):
+                                            if 'data:image' in src:
+                                                # Already base64 encoded
+                                                data['thumbnail'] = src
+                                            else:
+                                                data['thumbnail'] = src
+                                            break
+                                    
+                                    # Save JSON
+                                    json_path = websites_dir / f"gp_{site_id}_{timestamp}.json"
+                                    with open(json_path, 'w', encoding='utf-8') as f:
+                                        json.dump(data, f, indent=2, ensure_ascii=False)
+                                    
+                                    self._root.after(0, lambda: log_activity(f"✅ JSON created: {json_path.name}"))
+                                    log_to_file(f"[SingleFile Step 2] JSON saved: {json_path}")
+                            
+                            except Exception as extract_err:
+                                log_to_file(f"[SingleFile Step 2] Extraction error: {extract_err}")
+                                self._root.after(0, lambda err=str(extract_err): log_activity(f"❌ Extraction error: {err[:50]}"))
+                        
+                        elif destination.exists() and method == 'openai':
+                            # OpenAI mode - just save HTML, JSON will be created by batch process
+                            self._root.after(0, lambda: log_activity("📄 HTML saved - JSON will be created in batch (Process AI @ 20 files)"))
+                            log_to_file(f"[SingleFile Step 2] OpenAI mode - HTML saved, awaiting batch processing")
+                        
+                        elif not destination.exists():
+                            self._root.after(0, lambda: log_activity("⚠️ No HTML file found"))
+                        
+                        # Reset button after 2 seconds
+                        self._root.after(2000, lambda: singlefile_btn.config(text="💾 Run SingleFile", bg="#9B59B6"))
+                    
+                    except Exception as e:
+                        log_to_file(f"[SingleFile Step 2] Error: {e}")
+                        self._root.after(0, lambda err=str(e): log_activity(f"❌ Error: {err[:50]}"))
+                        self._root.after(0, lambda: singlefile_btn.config(text="💾 Run SingleFile", bg="#9B59B6"))
+                
+                thread = threading.Thread(target=automation_then_record, daemon=True)
+                thread.start()
+            
+            singlefile_btn = tk.Button(coord_frame, text="💾 Run SingleFile", bg="#9B59B6", fg="white",
+                                      font=("Segoe UI", 8, "bold"), padx=8, pady=3, relief="raised",
+                                      cursor="hand2", activebackground="#8E44AD",
+                                      command=run_singlefile_and_record)
+            singlefile_btn.pack(side="left", padx=2)
+            
+            def edit_singlefile_coords():
+                """Open popup to edit SingleFile click coordinates"""
+                print("[DEBUG] edit_singlefile_coords CALLED!")
+                log_to_file("[Edit SingleFile] Edit button clicked!")
+                popup = tk.Toplevel(activity_win)  # Parent to activity_win, not self._root
+                popup.title("Edit SingleFile Coordinates")
+                popup.geometry("280x200")
+                popup.configure(bg="#1C2833")
+                popup.attributes('-topmost', True)  # Keep on top
+                
+                # Center on screen
+                popup.update_idletasks()
+                x = (popup.winfo_screenwidth() // 2) - 140
+                y = (popup.winfo_screenheight() // 2) - 100
+                popup.geometry(f"+{x}+{y}")
+                
+                tk.Label(popup, text="SingleFile Click Coordinates", font=("Segoe UI", 10, "bold"),
+                        bg="#1C2833", fg="#9B59B6").pack(pady=(10, 5))
+                
+                # Click 1
+                frame1 = tk.Frame(popup, bg="#1C2833")
+                frame1.pack(pady=5)
+                tk.Label(frame1, text="Right-Click 1:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left", padx=5)
+                tk.Label(frame1, text="X:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left")
+                sf_x1_entry = tk.Entry(frame1, width=6, font=("Segoe UI", 9))
+                sf_x1_entry.insert(0, str(singlefile_coords['click1_x']))
+                sf_x1_entry.pack(side="left", padx=2)
+                tk.Label(frame1, text="Y:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left")
+                sf_y1_entry = tk.Entry(frame1, width=6, font=("Segoe UI", 9))
+                sf_y1_entry.insert(0, str(singlefile_coords['click1_y']))
+                sf_y1_entry.pack(side="left", padx=2)
+                
+                # Click 2
+                frame2 = tk.Frame(popup, bg="#1C2833")
+                frame2.pack(pady=5)
+                tk.Label(frame2, text="Menu Click 2:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left", padx=5)
+                tk.Label(frame2, text="X:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left")
+                sf_x2_entry = tk.Entry(frame2, width=6, font=("Segoe UI", 9))
+                sf_x2_entry.insert(0, str(singlefile_coords['click2_x']))
+                sf_x2_entry.pack(side="left", padx=2)
+                tk.Label(frame2, text="Y:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left")
+                sf_y2_entry = tk.Entry(frame2, width=6, font=("Segoe UI", 9))
+                sf_y2_entry.insert(0, str(singlefile_coords['click2_y']))
+                sf_y2_entry.pack(side="left", padx=2)
+                
+                def save_sf_coords():
+                    try:
+                        singlefile_coords['click1_x'] = int(sf_x1_entry.get())
+                        singlefile_coords['click1_y'] = int(sf_y1_entry.get())
+                        singlefile_coords['click2_x'] = int(sf_x2_entry.get())
+                        singlefile_coords['click2_y'] = int(sf_y2_entry.get())
+                        save_auto_settings()  # Persist to file
+                        log_activity(f"✅ SingleFile coords saved: ({singlefile_coords['click1_x']},{singlefile_coords['click1_y']}) → ({singlefile_coords['click2_x']},{singlefile_coords['click2_y']})")
+                        popup.destroy()
+                    except ValueError:
+                        tk.messagebox.showerror("Error", "Please enter valid numbers")
+                
+                btn_frame = tk.Frame(popup, bg="#1C2833")
+                btn_frame.pack(pady=15)
+                tk.Button(btn_frame, text="Save", bg="#27AE60", fg="white", font=("Segoe UI", 9, "bold"),
+                         padx=15, command=save_sf_coords).pack(side="left", padx=5)
+                tk.Button(btn_frame, text="Cancel", bg="#E74C3C", fg="white", font=("Segoe UI", 9, "bold"),
+                         padx=15, command=popup.destroy).pack(side="left", padx=5)
+            
+            def on_sf_edit_click():
+                print("[CLICK] SingleFile Edit button pressed!")
+                log_activity("✏️ Edit SingleFile coords clicked")
+                try:
+                    edit_singlefile_coords()
+                except Exception as e:
+                    print(f"[ERROR] edit_singlefile_coords failed: {e}")
+                    log_activity(f"❌ Edit error: {e}")
+            
+            singlefile_edit_btn = tk.Button(coord_frame, text="Edit", bg="#F39C12", fg="black",
+                                           font=("Segoe UI", 7, "bold"), padx=4, pady=2, relief="raised",
+                                           cursor="hand2", activebackground="#E67E22")
+            singlefile_edit_btn.config(command=on_sf_edit_click)
+            singlefile_edit_btn.pack(side="left", padx=2)
+            print("[INIT] SingleFile Edit button created and packed")
+            
+            # Second row for DivSnapper button
+            coord_frame2 = tk.Frame(step2_frame, bg="#1C2833")
+            coord_frame2.pack(pady=(0, 5))
+            
+            # Add Run DivSnapper button (for image capture)
+            def take_image_capture():
+                """Click (1240,30), then (1240,61), then let user position and click to record coord, then capture screenshot"""
+                print("[DEBUG] take_image_capture CALLED!")
+                log_to_file("[DivSnapper Button] Button clicked!")
+                try:
+                    log_activity("📸 DivSnapper button clicked...")
+                except Exception as e:
+                    print(f"[DEBUG] log_activity error: {e}")
+                if not hasattr(on_method_change, 'current_site_id') or not on_method_change.current_site_id:
+                    try:
+                        log_activity("⚠️ No website loaded yet")
+                    except:
+                        pass
+                    return
+                
+                import threading
+                def capture_image():
+                    try:
+                        import pyautogui
+                        from pynput import mouse
+                        from pathlib import Path
+                        from datetime import datetime
+                        
+                        # Define websites_dir here since it's not in scope
+                        websites_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites")
+                        websites_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        site_id = on_method_change.current_site_id
+                        log_to_file(f"[DivSnapper] Starting for site ID: {site_id}")
+                        self._root.after(0, lambda: log_activity("📸 Starting image capture..."))
+                        self._root.after(0, lambda: take_image_btn.config(text="📸 Clicking...", bg="#F39C12"))
+                        
+                        # Step 1: Click at configurable coords
+                        d1x, d1y = divsnapper_coords['click1_x'], divsnapper_coords['click1_y']
+                        log_to_file(f"[DivSnapper] Click 1: Clicking at ({d1x}, {d1y})...")
+                        self._root.after(0, lambda: log_activity(f"🖱️ Click 1: ({d1x}, {d1y})..."))
+                        pyautogui.moveTo(d1x, d1y, duration=0.3)
+                        time.sleep(0.2)
+                        pyautogui.click()
+                        time.sleep(0.5)
+                        
+                        # Step 2: Click at configurable coords
+                        d2x, d2y = divsnapper_coords['click2_x'], divsnapper_coords['click2_y']
+                        log_to_file(f"[DivSnapper] Click 2: Clicking at ({d2x}, {d2y})...")
+                        self._root.after(0, lambda: log_activity(f"🖱️ Click 2: ({d2x}, {d2y})..."))
+                        pyautogui.click(d2x, d2y)
+                        time.sleep(1)
+                        
+                        # Step 3: Wait for user to position and click
+                        log_to_file(f"[DivSnapper] Waiting for user to position mouse and click...")
+                        self._root.after(0, lambda: log_activity("🎯 Move mouse to position and click..."))
+                        self._root.after(0, lambda: take_image_btn.config(text="🎯 Click to record...", bg="#E67E22"))
+                        
+                        image_coords = {'x': None, 'y': None, 'captured': False}
+                        
+                        def on_click(x, y, button, pressed):
+                            if pressed and not image_coords['captured']:
+                                image_coords['x'] = x
+                                image_coords['y'] = y
+                                image_coords['captured'] = True
+                                return False  # Stop listener
+                        
+                        with mouse.Listener(on_click=on_click) as listener:
+                            listener.join()
+                        
+                        if image_coords['captured']:
+                            self._root.after(0, lambda: log_activity(f"✅ Coord recorded: ({image_coords['x']}, {image_coords['y']})"))
+                            self._root.after(0, lambda: take_image_btn.config(text="📸 Capturing...", bg="#F39C12"))
+                            
+                            # Save coords to database
+                            try:
+                                temp_db_conn = get_external_db()
+                                temp_db_cursor = temp_db_conn.cursor()
+                                temp_db_cursor.execute("""
+                                    UPDATE google_places 
+                                    SET click_coords_x = %s, click_coords_y = %s
+                                    WHERE id = %s
+                                """, (image_coords['x'], image_coords['y'], site_id))
+                                temp_db_conn.commit()
+                                temp_db_cursor.close()
+                                temp_db_conn.close()
+                                self._root.after(0, lambda: log_activity(f"💾 Coords saved to database"))
+                            except Exception as db_err:
+                                log_to_file(f"[DivSnapper] DB error: {db_err}")
+                            
+                            # Wait a moment for any dialogs
+                            time.sleep(0.5)
+                            
+                            # Calculate browser area (right 80% of screen)
+                            screen_w = pyautogui.size()[0]
+                            screen_h = pyautogui.size()[1]
+                            browser_x = int(screen_w * 0.2)  # Start at 20%
+                            browser_y = 0
+                            browser_w = int(screen_w * 0.8)  # 80% width
+                            browser_h = screen_h
+                            
+                            # Take screenshot of browser area
+                            screenshot = pyautogui.screenshot(region=(browser_x, browser_y, browser_w, browser_h))
+                            
+                            # Save with timestamp
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            image_path = websites_dir / f"gp_{site_id}_{timestamp}.png"
+                            screenshot.save(image_path)
+                            
+                            self._root.after(0, lambda: log_activity(f"✅ Image saved: gp_{site_id}_{timestamp}.png"))
+                            self._root.after(0, lambda: take_image_btn.config(text="✅ Captured", bg="#27AE60"))
+                            log_to_file(f"[DivSnapper] Image saved: {image_path}")
+                            
+                            # Reset button after 2 seconds
+                            self._root.after(2000, lambda: take_image_btn.config(text="📸 Run DivSnapper", bg="#3498DB"))
+                    
+                    except Exception as e:
+                        log_to_file(f"[DivSnapper] Error: {e}")
+                        self._root.after(0, lambda err=str(e): log_activity(f"❌ Error: {err[:50]}"))
+                        self._root.after(0, lambda: take_image_btn.config(text="📸 Run DivSnapper", bg="#3498DB"))
+                
+                thread = threading.Thread(target=capture_image, daemon=True)
+                thread.start()
+            
+            take_image_btn = tk.Button(coord_frame2, text="📸 Run DivSnapper", bg="#3498DB", fg="white",
+                                      font=("Segoe UI", 8, "bold"), padx=8, pady=3, relief="raised",
+                                      cursor="hand2", activebackground="#2980B9",
+                                      command=take_image_capture)
+            take_image_btn.pack(side="left", padx=2)
+            
+            def edit_divsnapper_coords():
+                """Open popup to edit DivSnapper click coordinates"""
+                print("[DEBUG] edit_divsnapper_coords CALLED!")
+                log_to_file("[Edit DivSnapper] Edit button clicked!")
+                popup = tk.Toplevel(activity_win)  # Parent to activity_win, not self._root
+                popup.title("Edit DivSnapper Coordinates")
+                popup.geometry("280x200")
+                popup.configure(bg="#1C2833")
+                popup.attributes('-topmost', True)  # Keep on top
+                
+                # Center on screen
+                popup.update_idletasks()
+                x = (popup.winfo_screenwidth() // 2) - 140
+                y = (popup.winfo_screenheight() // 2) - 100
+                popup.geometry(f"+{x}+{y}")
+                
+                tk.Label(popup, text="DivSnapper Click Coordinates", font=("Segoe UI", 10, "bold"),
+                        bg="#1C2833", fg="#3498DB").pack(pady=(10, 5))
+                
+                # Click 1
+                frame1 = tk.Frame(popup, bg="#1C2833")
+                frame1.pack(pady=5)
+                tk.Label(frame1, text="Click 1:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left", padx=5)
+                tk.Label(frame1, text="X:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left")
+                ds_x1_entry = tk.Entry(frame1, width=6, font=("Segoe UI", 9))
+                ds_x1_entry.insert(0, str(divsnapper_coords['click1_x']))
+                ds_x1_entry.pack(side="left", padx=2)
+                tk.Label(frame1, text="Y:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left")
+                ds_y1_entry = tk.Entry(frame1, width=6, font=("Segoe UI", 9))
+                ds_y1_entry.insert(0, str(divsnapper_coords['click1_y']))
+                ds_y1_entry.pack(side="left", padx=2)
+                
+                # Click 2
+                frame2 = tk.Frame(popup, bg="#1C2833")
+                frame2.pack(pady=5)
+                tk.Label(frame2, text="Click 2:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left", padx=5)
+                tk.Label(frame2, text="X:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left")
+                ds_x2_entry = tk.Entry(frame2, width=6, font=("Segoe UI", 9))
+                ds_x2_entry.insert(0, str(divsnapper_coords['click2_x']))
+                ds_x2_entry.pack(side="left", padx=2)
+                tk.Label(frame2, text="Y:", font=("Segoe UI", 9), bg="#1C2833", fg="#ECF0F1").pack(side="left")
+                ds_y2_entry = tk.Entry(frame2, width=6, font=("Segoe UI", 9))
+                ds_y2_entry.insert(0, str(divsnapper_coords['click2_y']))
+                ds_y2_entry.pack(side="left", padx=2)
+                
+                def save_ds_coords():
+                    try:
+                        divsnapper_coords['click1_x'] = int(ds_x1_entry.get())
+                        divsnapper_coords['click1_y'] = int(ds_y1_entry.get())
+                        divsnapper_coords['click2_x'] = int(ds_x2_entry.get())
+                        divsnapper_coords['click2_y'] = int(ds_y2_entry.get())
+                        save_auto_settings()  # Persist to file
+                        log_activity(f"✅ DivSnapper coords saved: ({divsnapper_coords['click1_x']},{divsnapper_coords['click1_y']}) → ({divsnapper_coords['click2_x']},{divsnapper_coords['click2_y']})")
+                        popup.destroy()
+                    except ValueError:
+                        tk.messagebox.showerror("Error", "Please enter valid numbers")
+                
+                btn_frame = tk.Frame(popup, bg="#1C2833")
+                btn_frame.pack(pady=15)
+                tk.Button(btn_frame, text="Save", bg="#27AE60", fg="white", font=("Segoe UI", 9, "bold"),
+                         padx=15, command=save_ds_coords).pack(side="left", padx=5)
+                tk.Button(btn_frame, text="Cancel", bg="#E74C3C", fg="white", font=("Segoe UI", 9, "bold"),
+                         padx=15, command=popup.destroy).pack(side="left", padx=5)
+            
+            def on_ds_edit_click():
+                print("[CLICK] DivSnapper Edit button pressed!")
+                log_activity("✏️ Edit DivSnapper coords clicked")
+                try:
+                    edit_divsnapper_coords()
+                except Exception as e:
+                    print(f"[ERROR] edit_divsnapper_coords failed: {e}")
+                    log_activity(f"❌ Edit error: {e}")
+            
+            divsnapper_edit_btn = tk.Button(coord_frame2, text="Edit", bg="#F39C12", fg="black",
+                                           font=("Segoe UI", 7, "bold"), padx=4, pady=2, relief="raised",
+                                           cursor="hand2", activebackground="#E67E22")
+            divsnapper_edit_btn.config(command=on_ds_edit_click)
+            divsnapper_edit_btn.pack(side="left", padx=2)
+            print("[INIT] DivSnapper Edit button created and packed")
+            
+            # === STEP 3: JSON ===
+            step3_frame = tk.Frame(extraction_frame, bg="#1C2833", relief="solid", bd=1)
+            step3_frame.pack(fill="x", padx=5, pady=2)
+            step3_header = tk.Frame(step3_frame, bg="#1C2833")
+            step3_header.pack(fill="x", pady=2)
+            tk.Label(step3_header, text="3️⃣ JSON", font=("Segoe UI", 9, "bold"), 
+                    bg="#1C2833", fg="#3498DB").pack(side="left", padx=5)
+            auto_json_cb = tk.Checkbutton(step3_header, text="Auto", variable=auto_json_var,
+                                         font=("Segoe UI", 7), bg="#1C2833", fg="#F39C12",
+                                         selectcolor="#1C2833", activebackground="#1C2833")
+            auto_json_cb.pack(side="right", padx=5)
+            
+            # Create variable to store extraction method choice (default: OpenAI, batch process at 20 files)
+            json_extraction_var = tk.StringVar(value="openai")
+            
+            # Row 1: OpenAI (default - batch process)
+            json_row1 = tk.Frame(step3_frame, bg="#1C2833")
+            json_row1.pack(anchor="w", pady=2, padx=10)
+            tk.Radiobutton(json_row1, text="🤖 OpenAI (Batch @ 20 files)", variable=json_extraction_var, value="openai",
+                          font=("Segoe UI", 8), bg="#1C2833", fg="#ECF0F1",
+                          selectcolor="#1C2833", activebackground="#1C2833").pack(side="left")
+            
+            # Row 2: BeautifulSoup (instant but basic)
+            json_row2 = tk.Frame(step3_frame, bg="#1C2833")
+            json_row2.pack(anchor="w", pady=2, padx=10)
+            tk.Radiobutton(json_row2, text="🥣 BeautifulSoup (Instant, Basic)", variable=json_extraction_var, value="beautifulsoup",
+                          font=("Segoe UI", 8), bg="#1C2833", fg="#ECF0F1",
+                          selectcolor="#1C2833", activebackground="#1C2833").pack(side="left")
+            
+            # Detection status
+            detect_status = tk.Label(extraction_frame,
+                text="✅ HTML captured",
+                font=("Segoe UI", 8), bg="#1C2833", fg="#27AE60")
+            detect_status.pack(pady=(0, 5))
+            
+            # Stats frame
+            stats_frame = tk.Frame(activity_win, bg="#2C3E50")
+            stats_frame.pack(fill="x", padx=5, pady=2)
+            
+            def create_stat(parent, emoji, value="0", label=""):
+                frame = tk.Frame(parent, bg="#34495E")
+                frame.pack(side="left", padx=2, fill="x", expand=True)
+                lbl = tk.Label(frame, text=f"{emoji}{value}", font=("Segoe UI", 9, "bold"),
+                              bg="#34495E", fg="white", padx=5, pady=1)
+                lbl.pack(side="top")
+                sublbl = tk.Label(frame, text=label, font=("Segoe UI", 7),
+                                 bg="#34495E", fg="#BDC3C7", padx=2)
+                sublbl.pack(side="top")
+                return lbl
+            
+            captured_lbl = create_stat(stats_frame, "📷", "0", "Captured")
+            pending_lbl = create_stat(stats_frame, "⏳", "0", "Pending")
+            
+            # Function to update file counts
+            def update_file_counts():
+                """Count HTML/image files (captured) and unprocessed files (pending = files without matching JSON)"""
+                try:
+                    websites_path = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites")
+                    if not websites_path.exists():
+                        return 0, 0
+                    
+                    # Count HTML and image files
+                    html_files = set(f.stem for f in websites_path.glob("*.html"))
+                    png_files = set(f.stem for f in websites_path.glob("*.png"))
+                    captured_stems = html_files | png_files
+                    
+                    # Count JSON files (processed)
+                    json_stems = set(f.stem for f in websites_path.glob("*.json"))
+                    
+                    # Pending = captured files without matching JSON
+                    pending_stems = captured_stems - json_stems
+                    
+                    captured_count = len(captured_stems)
+                    pending_count = len(pending_stems)
+                    
+                    return captured_count, pending_count
+                except Exception as e:
+                    log_to_file(f"[File Count] Error: {e}")
+                    return 0, 0
+            
+            def refresh_file_counts():
+                """Update the file count labels and enable/disable Process button"""
+                try:
+                    captured, pending = update_file_counts()
+                    captured_lbl.config(text=f"📷{captured}")
+                    pending_lbl.config(text=f"⏳{pending}")
+                    
+                    # Enable Process button if 20+ pending files
+                    if pending >= 20:
+                        process_openai_btn.config(state="normal", bg="#27AE60")
+                    else:
+                        process_openai_btn.config(state="disabled", bg="#7F8C8D")
+                except Exception as e:
+                    log_to_file(f"[Refresh Counts] Error: {e}")
+            
+            # Auto-refresh file counts every 5 seconds
+            def auto_refresh_counts():
+                try:
+                    if activity_win.winfo_exists():
+                        refresh_file_counts()
+                        activity_win.after(5000, auto_refresh_counts)
+                except Exception:
+                    pass
+            
+            # User action signals
+            user_action = {'value': None}  # 'dead_link', 'skip', 'next', or None
+            
+            # Control buttons frame - Row 1: Dead Link, Skip, Next, Mode Selector
+            action_frame = tk.Frame(activity_win, bg="#2C3E50")
+            action_frame.pack(fill="x", padx=5, pady=2)
+            
+            def mark_dead_link():
+                user_action['value'] = 'dead_link'
+                log_to_file(f"[User Action] Dead link clicked, user_action={user_action}")
+                log_activity("🔗❌ Marked as dead link - moving to next...")
+            
+            def mark_skip():
+                user_action['value'] = 'skip'
+                log_to_file(f"[User Action] Skip clicked, user_action={user_action}")
+                log_activity("⏭️ Skipping to next site...")
+            
+            def mark_next():
+                user_action['value'] = 'next'
+                log_to_file(f"[User Action] Next clicked, user_action={user_action}")
+                log_activity("➡️ Moving to next site...")
+            
+            def mark_no_apts():
+                user_action['value'] = 'no_apts'
+                log_to_file(f"[User Action] No Apts clicked, user_action={user_action}")
+                log_activity("🏚️ No apartments available - moving to next...")
+            
+            # Row 1 buttons: Dead Link, No Apts, Skip, NEXT
+            dead_link_btn = tk.Button(action_frame, text="Dead", bg="#E74C3C", fg="white",
+                                     font=("Segoe UI", 8, "bold"), padx=6, pady=3, relief="flat",
+                                     command=mark_dead_link)
+            dead_link_btn.pack(side="left", fill="x", expand=True, padx=1)
+            
+            no_apts_btn = tk.Button(action_frame, text="No Apts", bg="#E67E22", fg="white",
+                                   font=("Segoe UI", 8, "bold"), padx=6, pady=3, relief="flat",
+                                   command=mark_no_apts)
+            no_apts_btn.pack(side="left", fill="x", expand=True, padx=1)
+            
+            skip_btn = tk.Button(action_frame, text="⏭️ Skip", bg="#95A5A6", fg="white",
+                                font=("Segoe UI", 8, "bold"), padx=6, pady=3, relief="flat",
+                                command=mark_skip)
+            skip_btn.pack(side="left", fill="x", expand=True, padx=1)
+            
+            next_btn = tk.Button(action_frame, text="➡️ NEXT", bg="#27AE60", fg="white",
+                                font=("Segoe UI", 8, "bold"), padx=6, pady=3, relief="flat",
+                                command=mark_next)
+            next_btn.pack(side="left", fill="x", expand=True, padx=1)
+            
+            # Row 2: Additional action buttons
+            action_frame2 = tk.Frame(activity_win, bg="#2C3E50")
+            action_frame2.pack(fill="x", padx=5, pady=2)
+            
+            # Open HTML button
+            def open_html_file():
+                try:
+                    # Get the current HTML file path from the captured site
+                    if hasattr(open_html_file, 'current_html_path') and open_html_file.current_html_path:
+                        if os.path.exists(open_html_file.current_html_path):
+                            webbrowser.open(f"file:///{open_html_file.current_html_path}", new=0)
+                            log_activity(f"📄 Opened HTML in browser")
+                        else:
+                            log_activity("❌ HTML file not found")
+                    else:
+                        log_activity("❌ No HTML file to open yet")
+                except Exception as e:
+                    log_activity(f"❌ Error opening HTML: {e}")
+            
+            open_html_btn = tk.Button(action_frame2, text="📄 Open HTML", bg="#3498DB", fg="white",
+                                font=("Segoe UI", 8, "bold"), padx=8, pady=3, relief="flat",
+                                command=open_html_file)
+            open_html_btn.pack(side="left", fill="x", expand=True, padx=2)
+            
+            # Process AI button (next to Open HTML)
+            # Note: process_with_openai function is defined later, button created after it
+            
+            # Mode variable for compatibility (using STEP 1 method selection instead)
+            mode_var = tk.StringVar(value="headless")
+            
+            # Control buttons frame - Row 3: Pause, Folder, View JSON, Process AI
+            controls_frame = tk.Frame(activity_win, bg="#2C3E50")
+            controls_frame.pack(fill="x", padx=5, pady=2)
+            
+            def toggle_pause():
+                self._websites_auto_capture_paused = not self._websites_auto_capture_paused
+                if self._websites_auto_capture_paused:
+                    pause_btn.config(text="▶️ Resume", bg="#27AE60")
+                    log_activity("⏸️ Paused")
+                else:
+                    pause_btn.config(text="⏸️ Pause", bg="#F39C12")
+                    log_activity("▶️ Resumed")
+            
+            pause_btn = tk.Button(controls_frame, text="⏸️ Pause", bg="#F39C12", fg="white",
+                                 font=("Segoe UI", 8, "bold"), padx=8, pady=2, relief="flat",
+                                 command=toggle_pause)
+            pause_btn.pack(side="left", fill="x", expand=True, padx=2)
+            
+            def open_websites_folder():
+                import subprocess
+                websites_path = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites")
+                websites_path.mkdir(parents=True, exist_ok=True)
+                subprocess.Popen(f'explorer "{websites_path}"')
+            
+            def view_json_files():
+                """Open a window to view JSON files"""
+                import json
+                json_win = tk.Toplevel(self._root)
+                json_win.title("View JSON Files")
+                json_win.geometry("800x600")
+                json_win.configure(bg="#1C2833")
+                
+                # List JSON files
+                websites_path = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites")
+                json_files = sorted(websites_path.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+                
+                # Listbox for JSON files
+                list_frame = tk.Frame(json_win, bg="#1C2833")
+                list_frame.pack(side="left", fill="both", padx=5, pady=5)
+                
+                tk.Label(list_frame, text="JSON Files:", font=("Segoe UI", 10, "bold"),
+                        bg="#1C2833", fg="white").pack(pady=5)
+                
+                listbox = tk.Listbox(list_frame, width=40, height=30, bg="#2C3E50", fg="white",
+                                    font=("Segoe UI", 9), selectmode="single")
+                listbox.pack(fill="both", expand=True)
+                
+                for jf in json_files:
+                    listbox.insert("end", jf.name)
+                
+                # Text widget for JSON content
+                content_frame = tk.Frame(json_win, bg="#1C2833")
+                content_frame.pack(side="right", fill="both", expand=True, padx=5, pady=5)
+                
+                tk.Label(content_frame, text="Content:", font=("Segoe UI", 10, "bold"),
+                        bg="#1C2833", fg="white").pack(pady=5)
+                
+                text_widget = tk.Text(content_frame, wrap="word", bg="#2C3E50", fg="#ECF0F1",
+                                     font=("Consolas", 9), padx=10, pady=10)
+                text_widget.pack(fill="both", expand=True)
+                
+                def on_select(event):
+                    selection = listbox.curselection()
+                    if selection:
+                        idx = selection[0]
+                        json_path = json_files[idx]
+                        try:
+                            with open(json_path, 'r', encoding='utf-8') as f:
+                                content = json.load(f)
+                            text_widget.delete(1.0, "end")
+                            text_widget.insert(1.0, json.dumps(content, indent=2, ensure_ascii=False))
+                        except Exception as e:
+                            text_widget.delete(1.0, "end")
+                            text_widget.insert(1.0, f"Error loading JSON: {e}")
+                
+                listbox.bind("<<ListboxSelect>>", on_select)
+            
+            folder_btn = tk.Button(controls_frame, text="📁 Folder", bg="#3498DB", fg="white",
+                                  font=("Segoe UI", 8, "bold"), padx=8, pady=2, relief="flat",
+                                  command=open_websites_folder)
+            folder_btn.pack(side="left", fill="x", expand=True, padx=2)
+            
+            json_btn = tk.Button(controls_frame, text="📄 View JSON", bg="#9B59B6", fg="white",
+                                font=("Segoe UI", 8, "bold"), padx=8, pady=2, relief="flat",
+                                command=view_json_files)
+            json_btn.pack(side="left", fill="x", expand=True, padx=2)
+            
+            # Process with OpenAI button
+            def process_with_openai():
+                """Process all unprocessed HTML files with OpenAI - outputs ONE combined JSON"""
+                import threading
+                def run_openai_processing():
+                    try:
+                        import openai
+                        import json
+                        from bs4 import BeautifulSoup
+                        from datetime import datetime as dt
+                        
+                        websites_path = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites")
+                        
+                        # Get all HTML files (we'll track processed in the combined JSON)
+                        html_files = list(websites_path.glob("*.html"))
+                        
+                        if not html_files:
+                            self._root.after(0, lambda: log_activity("❌ No HTML files to process"))
+                            return
+                        
+                        total_files = len(html_files)
+                        self._root.after(0, lambda: log_activity(f"🤖 Processing {total_files} HTML files with OpenAI..."))
+                        self._root.after(0, lambda: process_openai_btn.config(text="🤖 Processing...", state="disabled"))
+                        
+                        # Get OpenAI API key
+                        api_key = None
+                        try:
+                            from config_auth import OPENAI_API_KEY
+                            api_key = OPENAI_API_KEY
+                        except:
+                            try:
+                                api_key = os.environ.get('OPENAI_API_KEY')
+                            except:
+                                pass
+                        
+                        if not api_key:
+                            self._root.after(0, lambda: log_activity("❌ No OpenAI API key found"))
+                            self._root.after(0, lambda: process_openai_btn.config(text="🤖 Process AI", state="normal"))
+                            return
+                        
+                        client = openai.OpenAI(api_key=api_key)
+                        
+                        # System prompt for extracting apartment listing data
+                        system_prompt = """Extract ALL apartment listing data from this website text. Return JSON with these exact fields matching the apartment_listings database table:
+
+{
+  "property_info": {
+    "Building_Name": "string - name of the apartment building/complex",
+    "full_address": "string - complete street address",
+    "street": "string - street name and number only",
+    "city": "string",
+    "state": "string",
+    "suburb": "string - neighborhood name if mentioned",
+    "phone_contact": "string - phone number",
+    "email_contact": "string - email address",
+    "listing_website": "string - website URL",
+    "apply_now_link": "string - application URL if different"
+  },
+  "units": [
+    {
+      "unit_number": "string - unit/apt number if shown",
+      "title": "string - unit name/title like 'Studio A' or '1BR Premium'",
+      "bedrooms": "string - number of bedrooms (Studio=0)",
+      "bathrooms": "string - number of bathrooms",
+      "sqft": "string - square footage",
+      "price": "integer - monthly rent in dollars (no $ sign)",
+      "available_date": "string - move-in date or 'now'",
+      "Lease_Length": "string - lease term if mentioned",
+      "Deposit_Amount": "string - security deposit amount",
+      "floorplan_url": "string - link to floorplan image if available",
+      "description": "string - unit-specific description"
+    }
+  ],
+  "amenities": {
+    "Pool": "yes/no/null",
+    "Gym": "yes/no/null",
+    "Balcony": "yes/no/null",
+    "Parking": "string - parking type or null",
+    "parking_fee": "string - monthly parking cost or null",
+    "Cats": "yes/no/null",
+    "Dogs": "yes/no/null",
+    "MFTE": "yes/no/null",
+    "amenities_list": ["array", "of", "amenities"]
+  },
+  "policies": {
+    "Application_Fee": "string",
+    "Credit_Score": "string",
+    "Managed": "string - property management company"
+  }
+}
+
+Extract EVERY piece of information. Use null for missing fields. Create one entry per distinct unit/floorplan."""
+                        
+                        # Collect all results into one combined JSON
+                        all_results = {
+                            "_metadata": {
+                                "processed_at": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "total_files": total_files,
+                                "model": "gpt-4o-mini"
+                            },
+                            "properties": []
+                        }
+                        
+                        processed = 0
+                        errors = []
+                        
+                        # Process each HTML file
+                        for html_path in html_files:
+                            try:
+                                stem = html_path.stem
+                                self._root.after(0, lambda s=stem: log_activity(f"📄 Processing: {s}..."))
+                                
+                                with open(html_path, 'r', encoding='utf-8') as f:
+                                    soup = BeautifulSoup(f.read(), 'html.parser')
+                                    html_text = soup.get_text(separator='\n', strip=True)[:12000]
+                                
+                                response = client.chat.completions.create(
+                                    model="gpt-4o-mini",
+                                    messages=[
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": f"Extract all apartment listing data from this website:\n\n{html_text}"}
+                                    ],
+                                    response_format={"type": "json_object"}
+                                )
+                                
+                                result = json.loads(response.choices[0].message.content)
+                                result['_source_file'] = html_path.name
+                                
+                                # Extract google_places_id from filename (gp_XXX_timestamp.html)
+                                if stem.startswith('gp_'):
+                                    parts = stem.split('_')
+                                    if len(parts) >= 2:
+                                        result['_google_places_id'] = parts[1]
+                                
+                                all_results['properties'].append(result)
+                                processed += 1
+                                self._root.after(0, lambda p=processed, t=total_files: log_activity(f"✅ {p}/{t} processed"))
+                                
+                            except Exception as e:
+                                errors.append({"file": html_path.name, "error": str(e)})
+                                self._root.after(0, lambda err=str(e)[:40], s=stem: log_activity(f"❌ {s}: {err}"))
+                        
+                        # Add errors to metadata
+                        if errors:
+                            all_results['_metadata']['errors'] = errors
+                        
+                        all_results['_metadata']['successful'] = processed
+                        
+                        # Save ONE combined JSON file
+                        timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
+                        combined_json_path = websites_path / f"openai_batch_{timestamp}.json"
+                        with open(combined_json_path, 'w', encoding='utf-8') as f:
+                            json.dump(all_results, f, indent=2, ensure_ascii=False)
+                        
+                        self._root.after(0, lambda: log_activity(f"🎉 Done! Saved: openai_batch_{timestamp}.json"))
+                        self._root.after(0, lambda p=processed: log_activity(f"✅ {p} properties extracted to ONE JSON file"))
+                        self._root.after(0, lambda: process_openai_btn.config(text="🤖 Process AI", state="normal"))
+                        self._root.after(0, refresh_file_counts)
+                        
+                    except Exception as e:
+                        self._root.after(0, lambda err=str(e): log_activity(f"❌ OpenAI error: {err[:50]}"))
+                        self._root.after(0, lambda: process_openai_btn.config(text="🤖 Process AI", state="normal"))
+                
+                thread = threading.Thread(target=run_openai_processing, daemon=True)
+                thread.start()
+            
+            # Process AI button next to Open HTML
+            process_openai_btn = tk.Button(action_frame2, text="🤖 Process AI", bg="#9B59B6", fg="white",
+                                          font=("Segoe UI", 8, "bold"), padx=8, pady=3, relief="flat",
+                                          command=process_with_openai)
+            process_openai_btn.pack(side="left", fill="x", expand=True, padx=2)
+            
+            # Insert to DB function - now uploads JSON to server via SFTP
+            def insert_to_database():
+                """Upload latest OpenAI JSON to server via SFTP"""
+                import threading
+                def run_insert():
+                    try:
+                        from pathlib import Path
+                        import paramiko
+                        
+                        self._root.after(0, lambda: log_activity("📤 Uploading JSON to server..."))
+                        self._root.after(0, lambda: insert_db_btn.config(text="📤 Uploading...", state="disabled"))
+                        
+                        # Find the latest openai_batch_*.json file
+                        websites_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites")
+                        json_files = list(websites_dir.glob("openai_batch_*.json"))
+                        
+                        if not json_files:
+                            self._root.after(0, lambda: log_activity("❌ No openai_batch_*.json files found"))
+                            log_to_file("[Upload JSON] No openai_batch_*.json files found")
+                            self._root.after(0, lambda: insert_db_btn.config(text="📤 Upload JSON", state="normal"))
+                            return
+                        
+                        # Get the most recent file
+                        latest_json = max(json_files, key=lambda f: f.stat().st_mtime)
+                        log_to_file(f"[Upload JSON] Found latest JSON: {latest_json.name}")
+                        self._root.after(0, lambda f=latest_json.name: log_activity(f"📁 Found: {f}"))
+                        
+                        # SFTP config
+                        SFTP_HOST = "172.104.206.182"
+                        SFTP_PORT = 23655
+                        SFTP_USER = "daniel"
+                        SFTP_PASS = "Driver89*"
+                        REMOTE_DIR = "/home/daniel/api/trustyhousing.com/user/admin/openai"  # Folder on server for JSON files
+                        
+                        log_to_file(f"[Upload JSON] Connecting to SFTP {SFTP_HOST}:{SFTP_PORT}")
+                        self._root.after(0, lambda: log_activity("🔗 Connecting to server..."))
+                        
+                        # Connect via SFTP
+                        transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+                        transport.connect(username=SFTP_USER, password=SFTP_PASS)
+                        sftp = paramiko.SFTPClient.from_transport(transport)
+                        
+                        # Ensure remote directory exists
+                        try:
+                            sftp.stat(REMOTE_DIR)
+                        except FileNotFoundError:
+                            try:
+                                sftp.mkdir(REMOTE_DIR)
+                                log_to_file(f"[Upload JSON] Created remote directory: {REMOTE_DIR}")
+                            except Exception as mkdir_err:
+                                log_to_file(f"[Upload JSON] Could not create directory: {mkdir_err}")
+                        
+                        # Upload the file
+                        remote_path = f"{REMOTE_DIR}/{latest_json.name}"
+                        log_to_file(f"[Upload JSON] Uploading to: {remote_path}")
+                        self._root.after(0, lambda: log_activity("⬆️ Uploading file..."))
+                        
+                        sftp.put(str(latest_json), remote_path)
+                        
+                        # Close connections
+                        sftp.close()
+                        transport.close()
+                        
+                        file_size = latest_json.stat().st_size / 1024  # KB
+                        log_to_file(f"[Upload JSON] ✓ Upload complete: {latest_json.name} ({file_size:.1f} KB)")
+                        self._root.after(0, lambda f=latest_json.name, s=file_size: 
+                            log_activity(f"✅ Uploaded: {f} ({s:.1f} KB)"))
+                        self._root.after(0, lambda: insert_db_btn.config(text="📤 Upload JSON", state="normal"))
+                        
+                    except Exception as e:
+                        import traceback
+                        self._root.after(0, lambda err=str(e)[:50]: log_activity(f"❌ Upload error: {err}"))
+                        log_to_file(f"[Upload JSON] Exception: {e}")
+                        log_to_file(f"[Upload JSON] Traceback: {traceback.format_exc()}")
+                        self._root.after(0, lambda: insert_db_btn.config(text="📤 Upload JSON", state="normal"))
+                
+                thread = threading.Thread(target=run_insert, daemon=True)
+                thread.start()
+            
+            # Upload JSON button (renamed from Insert DB)
+            insert_db_btn = tk.Button(action_frame2, text="📤 Upload JSON", bg="#27AE60", fg="white",
+                                     font=("Segoe UI", 8, "bold"), padx=8, pady=3, relief="flat",
+                                     command=insert_to_database)
+            insert_db_btn.pack(side="left", fill="x", expand=True, padx=2)
+            
+            # Start auto-refresh of file counts
+            activity_win.after(1000, auto_refresh_counts)
+            refresh_file_counts()  # Initial count
+            
+            # Status label
+            status_lbl = tk.Label(
+                activity_win,
+                text="Starting...",
+                font=("Segoe UI", 9),
+                bg="#2C3E50",
+                fg="#ECF0F1",
+                wraplength=win_w - 20
+            )
+            status_lbl.pack(fill="x", padx=5, pady=2)
+            
+            # Activity log
+            log_frame = tk.Frame(activity_win, bg="#2C3E50")
+            log_frame.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            log_scroll = tk.Scrollbar(log_frame)
+            log_scroll.pack(side="right", fill="y")
+            
+            log_text = tk.Text(
+                log_frame,
+                font=("Consolas", 8),
+                bg="#1C2833",
+                fg="#ECF0F1",
+                wrap="word",
+                yscrollcommand=log_scroll.set,
+                height=8,
+                exportselection=True,  # Enable clipboard export
+                selectbackground="#3498DB",  # Visible selection color
+                selectforeground="white"
+            )
+            log_text.pack(side="left", fill="both", expand=True)
+            log_scroll.config(command=log_text.yview)
+            
+            # Add right-click context menu for copy
+            def show_context_menu(event):
+                context_menu = tk.Menu(log_text, tearoff=0)
+                context_menu.add_command(label="Copy", command=lambda: copy_selection())
+                context_menu.add_command(label="Select All", command=lambda: log_text.tag_add("sel", "1.0", "end"))
+                context_menu.tk_popup(event.x_root, event.y_root)
+            log_text.bind("<Button-3>", show_context_menu)
+            
+            # Enable copy with Ctrl+C
+            def copy_selection(event=None):
+                try:
+                    selected = log_text.get("sel.first", "sel.last")
+                    if selected:
+                        activity_win.clipboard_clear()
+                        activity_win.clipboard_append(selected)
+                except tk.TclError:
+                    pass  # No selection
+                return "break"
+            log_text.bind("<Control-c>", copy_selection)
+            log_text.bind("<Control-C>", copy_selection)
+            log_text.bind("<Control-a>", lambda e: (log_text.tag_add("sel", "1.0", "end"), "break"))
+            log_text.bind("<Control-A>", lambda e: (log_text.tag_add("sel", "1.0", "end"), "break"))
+            
+            log_to_file("[Websites Auto Capture] Activity log text widget created")
+            
+            def log_activity(msg):
+                """Add message to activity log"""
+                # Also log to file for debugging
+                log_to_file(f"[Websites Capture] {msg}")
+                try:
+                    if activity_win.winfo_exists():
+                        import datetime
+                        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                        log_text.insert("end", f"[{timestamp}] {msg}\n")
+                        log_text.see("end")
+                except Exception as e:
+                    log_to_file(f"[Websites Capture] log_activity error: {e}")
+            
+            def _run_websites_auto_capture():
+                """Background thread for websites auto capture"""
+                log_to_file("[Websites Capture] Thread started")
+                
+                db_conn = None
+                db_cursor = None
+                capture_count = 0
+                
+                try:
+                    log_to_file("[Websites Capture] Starting imports...")
+                    import webbrowser
+                    log_to_file("[Websites Capture] - webbrowser imported")
+                    import subprocess
+                    log_to_file("[Websites Capture] - subprocess imported")
+                    from PIL import ImageGrab
+                    log_to_file("[Websites Capture] - PIL imported")
+                    import pyautogui
+                    log_to_file("[Websites Capture] - pyautogui imported")
+                    try:
+                        from pynput import mouse
+                        log_to_file("[Websites Capture] - pynput imported")
+                    except ImportError:
+                        log_to_file("[Websites Capture] - pynput not available, installing...")
+                        subprocess.run([sys.executable, "-m", "pip", "install", "pynput"], check=True)
+                        from pynput import mouse
+                        log_to_file("[Websites Capture] - pynput installed and imported")
+                    try:
+                        from selenium import webdriver
+                        from selenium.webdriver.chrome.options import Options as ChromeOptions
+                        log_to_file("[Websites Capture] - selenium imported")
+                    except ImportError:
+                        webdriver = None
+                        log_to_file("[Websites Capture] - selenium not available")
+                    try:
+                        import pymysql
+                        log_to_file("[Websites Capture] - pymysql imported")
+                    except ImportError:
+                        pymysql = None
+                        log_to_file("[Websites Capture] - pymysql not available (dead link feature disabled)")
+                    log_to_file("[Websites Capture] ✓ All imports complete")
+                    
+                    websites_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\websites")
+                    websites_dir.mkdir(parents=True, exist_ok=True)
+                    log_to_file(f"[Websites Capture] Websites dir: {websites_dir}")
+                    
+                    capture_start_time = time.time()
+                    log_to_file("[Websites Capture] Entering main try block")
+                    self._root.after(0, lambda: log_activity("🚀 Starting websites auto capture..."))
+                    self._root.after(0, lambda: status_lbl.config(text="Initializing..."))
+                    
+                    # Connect to database for dead link updates and extraction method tracking
+                    log_to_file("[Websites Capture] Connecting to DB...")
+                    self._root.after(0, lambda: log_activity("📦 Connecting to database..."))
+                    try:
+                        db_conn = get_external_db()
+                        db_cursor = db_conn.cursor()
+                        
+                        # Check if columns exist, if not create them
+                        try:
+                            # Check click_coords_x column
+                            db_cursor.execute("""
+                                SELECT column_name FROM information_schema.columns 
+                                WHERE table_schema = 'offta' 
+                                AND table_name = 'google_places' 
+                                AND column_name = 'click_coords_x'
+                            """)
+                            if not db_cursor.fetchone():
+                                db_cursor.execute("ALTER TABLE google_places ADD COLUMN click_coords_x INT DEFAULT NULL")
+                                db_conn.commit()
+                            
+                            # Check click_coords_y column
+                            db_cursor.execute("""
+                                SELECT column_name FROM information_schema.columns 
+                                WHERE table_schema = 'offta' 
+                                AND table_name = 'google_places' 
+                                AND column_name = 'click_coords_y'
+                            """)
+                            if not db_cursor.fetchone():
+                                db_cursor.execute("ALTER TABLE google_places ADD COLUMN click_coords_y INT DEFAULT NULL")
+                                db_conn.commit()
+                            
+                            # Check element_tag column
+                            db_cursor.execute("""
+                                SELECT column_name FROM information_schema.columns 
+                                WHERE table_schema = 'offta' 
+                                AND table_name = 'google_places' 
+                                AND column_name = 'element_tag'
+                            """)
+                            if not db_cursor.fetchone():
+                                db_cursor.execute("ALTER TABLE google_places ADD COLUMN element_tag VARCHAR(255) DEFAULT NULL")
+                                db_conn.commit()
+                            
+                            # Also update google_addresses extraction_method ENUM
+                            log_to_file("[Websites Capture] Checking google_addresses extraction_method column...")
+                            try:
+                                db_cursor.execute("""
+                                    SELECT column_name FROM information_schema.columns 
+                                    WHERE table_schema = 'offta' 
+                                    AND table_name = 'google_addresses' 
+                                    AND column_name = 'extraction_method'
+                                """)
+                                if not db_cursor.fetchone():
+                                    log_to_file("[Websites Capture] Creating google_addresses extraction_method column...")
+                                    db_cursor.execute("""
+                                        ALTER TABLE google_addresses 
+                                        ADD COLUMN extraction_method ENUM('headless', 'image', 'html') DEFAULT NULL
+                                    """)
+                                    db_conn.commit()
+                                else:
+                                    # Ensure ENUM includes 'html' value
+                                    db_cursor.execute("""
+                                        ALTER TABLE google_addresses 
+                                        MODIFY COLUMN extraction_method ENUM('headless', 'image', 'html') DEFAULT NULL
+                                    """)
+                                    db_conn.commit()
+                            except Exception as ga_alter_err:
+                                log_to_file(f"[Websites Capture] google_addresses ENUM alter note: {ga_alter_err}")
+                                
+                            log_to_file("[Websites Capture] All columns verified/created")
+                            self._root.after(0, lambda: log_activity("   ✅ Database columns ready"))
+                        except Exception as col_err:
+                            log_to_file(f"[Websites Capture] Column check/create error: {col_err}")
+                        
+                        log_to_file("[Websites Capture] DB connected successfully")
+                        self._root.after(0, lambda: log_activity("✅ DB connected for updates"))
+                    except Exception as db_err:
+                        db_conn = None
+                        db_cursor = None
+                        log_to_file(f"[Websites Capture] DB connection failed: {db_err}")
+                        self._root.after(0, lambda e=str(db_err): log_activity(f"⚠️ DB failed: {e[:50]}"))
+                    
+                    # Get websites from tree view that have availability_website
+                    log_to_file("[Websites Capture] About to collect websites from tree...")
+                    self._root.after(0, lambda: log_activity("📋 Collecting websites from tree..."))
+                    websites_to_capture = []
+                    collection_done = [False]  # Use list to allow modification in nested function
+                    
+                    # Check if single website mode (from Play button)
+                    single_mode = False
+                    if hasattr(self, '_single_website_mode') and self._single_website_mode:
+                        single_mode = True
+                        single_data = self._single_website_mode
+                        websites_to_capture.append({
+                            'id': single_data['id'],
+                            'name': single_data['name'],
+                            'url': single_data['url']
+                        })
+                        log_to_file(f"[Websites Capture] Single website mode: {single_data['name']} (ID: {single_data['id']})")
+                        self._root.after(0, lambda: log_activity(f"▶️ Single website mode: {single_data['name']}"))
+                        self._root.after(0, lambda: current_building_lbl.config(text=f"ID: {single_data['id']} | {single_data['name']}"))
+                        collection_done[0] = True
+                        # Clear the flag
+                        self._single_website_mode = None
+                    
+                    def collect_websites():
+                        if single_mode:
+                            return  # Skip collection if single mode
+                        log_to_file("[Websites Capture] collect_websites() called")
+                        self._root.after(0, lambda: log_activity("   🔍 Scanning tree items..."))
+                        try:
+                            tree_items = self._queue_tree.get_children()
+                            log_to_file(f"[Websites Capture] Found {len(tree_items)} tree items")
+                            self._root.after(0, lambda n=len(tree_items): log_activity(f"   📊 Found {n} tree items"))
+                            
+                            for item in tree_items:
+                                vals = self._queue_tree.item(item, 'values') or []
+                                # For Websites tab: vals[12] = availability_website (hidden1), vals[13] = link (hidden2), vals[14] = id (hidden3), vals[15] = extraction_method (hidden4)
+                                if len(vals) >= 15:
+                                    website_id = str(vals[14]).strip()  # hidden3 = clean ID
+                                    name = vals[4] if len(vals) > 4 else ''  # Column 4 = Name
+                                    avail_url = vals[12] if len(vals) > 12 else ''  # hidden1 = availability_website (full URL)
+                                    db_method = vals[15] if len(vals) > 15 else ''  # hidden4 = extraction_method from DB
+                                    
+                                    # Filter out invalid URLs
+                                    if avail_url and avail_url.strip():
+                                        avail_url_clean = avail_url.strip()
+                                        # Skip placeholder values
+                                        if avail_url_clean in ['main_source_site', 'not_for_rent', 'N/A', '', 'None']:
+                                            log_to_file(f"[Websites Capture] Skipping {name} - placeholder URL: {avail_url_clean}")
+                                            continue
+                                        # Only include valid HTTP(S) URLs
+                                        avail_url_lower = avail_url_clean.lower()
+                                        if not (avail_url_lower.startswith('http://') or avail_url_lower.startswith('https://')):
+                                            log_to_file(f"[Websites Capture] Skipping {name} - no http/https: {avail_url_clean}")
+                                            continue
+                                        websites_to_capture.append({
+                                            'id': website_id,
+                                            'name': name,
+                                            'url': avail_url_clean,
+                                            'extraction_method': db_method  # Include method from DB
+                                        })
+                            collection_done[0] = True
+                            log_to_file(f"[Websites Capture] Collected {len(websites_to_capture)} websites with URLs")
+                        except Exception as e:
+                            log_to_file(f"[Websites Capture] collect_websites error: {e}")
+                            collection_done[0] = True
+                        self._root.after(0, lambda n=len(websites_to_capture): log_activity(f"   ✅ Collected {n} websites with URLs"))
+                    
+                    self._root.after(0, collect_websites)
+                    
+                    # Wait for collection to complete
+                    if not single_mode:
+                        wait_start = time.time()
+                        while not collection_done[0] and time.time() - wait_start < 5:
+                            time.sleep(0.1)
+                        
+                        if not collection_done[0]:
+                            self._root.after(0, lambda: log_activity("⚠️ Collection timed out, proceeding..."))
+                        
+                        time.sleep(0.3)  # Small additional wait for UI
+                    
+                    if not websites_to_capture:
+                        self._root.after(0, lambda: log_activity("❌ No websites with availability URLs found"))
+                        self._root.after(0, lambda: log_activity("   ℹ️ Make sure Websites tab is loaded"))
+                        self._root.after(0, lambda: log_activity("   ℹ️ Check that entries have availability_website"))
+                        self._root.after(0, lambda: status_lbl.config(text="No websites to capture"))
+                        return
+                    
+                    # Randomize order for variety
+                    import random
+                    random.shuffle(websites_to_capture)
+                    log_to_file(f"[Websites Capture] Shuffled {len(websites_to_capture)} websites randomly")
+                    
+                    total = len(websites_to_capture)
+                    self._root.after(0, lambda t=total: log_activity(f"📋 Ready to capture {t} websites (random order)"))
+                    self._root.after(0, lambda t=total: pending_lbl.config(text=f"⏳{t}"))
+                    
+                    # Show all websites in log
+                    for i, w in enumerate(websites_to_capture):
+                        self._root.after(0, lambda idx=i, n=w['name'], u=w['url'][:50]: log_activity(f"   {idx+1}. {n[:30]} - {u}..."))
+                    
+                    # Open Chrome with subprocess - NO SELENIUM!
+                    self._root.after(0, lambda: log_activity("🌐 Opening Chrome with 75% zoom..."))
+                    
+                    # Close any existing Chrome windows first
+                    try:
+                        import pygetwindow as gw
+                        chrome_windows = [w for w in gw.getAllWindows() if 'chrome' in w.title.lower()]
+                        for win in chrome_windows:
+                            try:
+                                win.close()
+                            except:
+                                pass
+                        if chrome_windows:
+                            time.sleep(1)
+                            log_to_file(f"[Websites Capture] Closed {len(chrome_windows)} existing Chrome window(s)")
+                            self._root.after(0, lambda: log_activity(f"🚫 Closed {len(chrome_windows)} existing Chrome window(s)"))
+                    except Exception as close_err:
+                        log_to_file(f"[Websites Capture] Could not close Chrome: {close_err}")
+                    
+                    # Find Chrome
+                    chrome_paths = [
+                        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                    ]
+                    
+                    chrome_path = None
+                    for path in chrome_paths:
+                        if os.path.exists(path):
+                            chrome_path = path
+                            break
+                    
+                    if not chrome_path:
+                        self._root.after(0, lambda: log_activity("❌ Chrome not found"))
+                        return
+                    
+                    # Open Chrome with 75% zoom using flag
+                    first_url = websites_to_capture[0]['url'] if websites_to_capture else "about:blank"
+                    log_to_file(f"[Websites Capture] Opening Chrome at: {chrome_path}")
+                    subprocess.Popen([
+                        chrome_path,
+                        "--new-window",
+                        "--force-device-scale-factor=0.75",
+                        "--safebrowsing-disable-download-protection",
+                        "--disable-features=SafeBrowsingEnhancedProtection",
+                        first_url
+                    ])
+                    self._root.after(0, lambda: log_activity(f"✅ Chrome launched"))
+                    
+                    time.sleep(3)  # Wait for Chrome to start
+                    
+                    # Position browser window to right 80% of screen, 100% height
+                    try:
+                        import pygetwindow as gw
+                        
+                        screen_w = pyautogui.size()[0]
+                        screen_h = pyautogui.size()[1]
+                        
+                        # Calculate right 80% position: 80% width, 100% height
+                        window_width = int(screen_w * 0.8)
+                        window_height = screen_h
+                        window_x = int(screen_w * 0.2)  # Start at 20% (right 80%)
+                        window_y = 0
+                        
+                        # Find Chrome window
+                        browser_window = None
+                        for window in gw.getAllWindows():
+                            if 'chrome' in window.title.lower():
+                                browser_window = window
+                                break
+                        
+                        if browser_window:
+                            browser_window.moveTo(window_x, window_y)
+                            browser_window.resizeTo(window_width, window_height)
+                            browser_window.activate()
+                            log_to_file(f"[Websites Capture] Positioned: x={window_x}, w={window_width}, h={window_height}")
+                            
+                            self._root.after(0, lambda: log_activity(f"✅ Browser: right 80%, 75% zoom"))
+                        else:
+                            log_to_file("[Websites Capture] Could not find Chrome window")
+                            self._root.after(0, lambda: log_activity(f"⚠️ Could not position browser"))
+                    except Exception as pos_err:
+                        log_to_file(f"[Websites Capture] Window positioning error: {pos_err}")
+                    
+                    time.sleep(2)  # Wait for positioning
+                    
+                    self._root.after(0, lambda: log_activity("✅ Browser ready - starting captures"))
+                    self._root.after(0, lambda: status_lbl.config(text="Browser ready"))
+                    browser_opened = True
+                    
+                    # Track recorded selections for each website
+                    recorded_selections = {}  # {gp_id: {'click_x': x, 'click_y': y}}
+                    
+                    browser_opened = True  # Track that browser is open
+                    
+                    for idx, website in enumerate(websites_to_capture):
+                        # Check pause
+                        while self._websites_auto_capture_paused:
+                            time.sleep(0.5)
+                            self._root.after(0, lambda: status_lbl.config(text="⏸️ Paused"))
+                        
+                        if not self._websites_auto_capture_running:
+                            break
+                        
+                        # Reset user action for this site
+                        user_action['value'] = None
+                        
+                        site_id = website['id']
+                        site_name = website['name']
+                        site_url = website['url']
+                        site_method = website.get('extraction_method', '') or ''
+                        
+                        # Set the method radio button based on DB value
+                        if site_method:
+                            # Map DB values to radio button values
+                            method_map = {'headless': 'headless', 'image': 'image', 'html': 'manual'}
+                            radio_value = method_map.get(site_method, 'manual')
+                            self._root.after(0, lambda v=radio_value: extraction_method_var.set(v))
+                            log_to_file(f"[Websites Capture] Loaded extraction_method={site_method} -> radio={radio_value} for {site_name}")
+                        
+                        # Initialize action flags for this iteration
+                        mark_as_dead = False
+                        mark_no_apts = False
+                        skip_this_site = False
+                        html_captured = False
+                        
+                        # Store URL and ID for radio button handler
+                        on_method_change.current_site_url = site_url
+                        on_method_change.current_site_id = site_id
+                        
+                        # Validate URL
+                        if not site_url or not site_url.strip() or not site_url.startswith('http'):
+                            log_to_file(f"[Websites Capture] Invalid URL for {site_name}: {site_url}")
+                            self._root.after(0, lambda n=site_name: log_activity(f"⚠️ Skipping {n} (invalid URL)"))
+                            continue
+                        
+                        # Update current building display
+                        self._root.after(0, lambda sid=site_id, sn=site_name: 
+                            current_building_lbl.config(text=f"ID: {sid} | Building: {sn[:30]}...") if len(sn) > 30 
+                            else current_building_lbl.config(text=f"ID: {sid} | Building: {sn}"))
+                        
+                        # Check if already captured
+                        existing = list(websites_dir.glob(f"gp_id_{site_id}.html"))
+                        if existing:
+                            self._root.after(0, lambda n=site_name: log_activity(f"⏭️ Skipping {n} (already captured)"))
+                            continue
+                        
+                        self._root.after(0, lambda n=site_name: log_activity(f"🌐 Opening: {n}"))
+                        self._root.after(0, lambda n=site_name: status_lbl.config(text=f"Loading: {n}"))
+                        self._root.after(0, lambda: detect_status.config(text="⏳ Loading page...", fg="#F39C12"))
+                        
+                        # Get selected extraction method from radio button
+                        selected_method = extraction_method_var.get()
+                        log_to_file(f"[Websites Capture] Selected method: {selected_method}")
+                        self._root.after(0, lambda m=selected_method: log_activity(f"🔧 Method: {m}"))
+                        
+                        # Open URL in browser
+                        if idx == 0:
+                            # First URL already opened, wait longer
+                            time.sleep(5)
+                        else:
+                            # Open subsequent URLs in the existing Chrome window
+                            # First, focus the Chrome window
+                            self._root.after(0, lambda u=site_url[:50]: log_activity(f"🌐 Navigating to: {u}..."))
+                            try:
+                                import pyperclip
+                                import pygetwindow as gw
+                                
+                                # Find and focus Chrome window
+                                chrome_windows = [w for w in gw.getAllWindows() if 'chrome' in w.title.lower()]
+                                if chrome_windows:
+                                    chrome_win = chrome_windows[-1]  # Get the most recent Chrome window
+                                    try:
+                                        chrome_win.activate()
+                                        time.sleep(0.5)  # Wait for window to activate
+                                        log_to_file(f"[Websites Capture] Focused Chrome window: {chrome_win.title[:50]}")
+                                    except Exception as focus_err:
+                                        log_to_file(f"[Websites Capture] Could not focus Chrome: {focus_err}")
+                                        # Try clicking on the Chrome window position
+                                        try:
+                                            pyautogui.click(chrome_win.left + 100, chrome_win.top + 100)
+                                            time.sleep(0.3)
+                                        except:
+                                            pass
+                                
+                                # Now use keyboard to navigate
+                                pyperclip.copy(site_url)  # Copy URL to clipboard
+                                pyautogui.hotkey('ctrl', 'l')  # Focus address bar
+                                time.sleep(0.3)
+                                pyautogui.hotkey('ctrl', 'a')  # Select all
+                                time.sleep(0.1)
+                                pyautogui.hotkey('ctrl', 'v')  # Paste URL
+                                time.sleep(0.2)
+                                pyautogui.press('enter')  # Navigate
+                                time.sleep(4)  # Wait for page load
+                            except Exception as nav_err:
+                                log_to_file(f"[Websites Capture] Navigation error: {nav_err}")
+                                # Fallback to webbrowser
+                                webbrowser.open(site_url, new=0)
+                                time.sleep(4)
+                        
+                        # Check the selected method
+                        if selected_method == "manual":
+                            # MANUAL HTML METHOD: User will click "Run SingleFile" button in Step 2
+                            self._root.after(0, lambda: log_activity("📄 Click 'Run SingleFile' button, then press NEXT when done..."))
+                            self._root.after(0, lambda: status_lbl.config(text="📄 Manual HTML"))
+                            self._root.after(0, lambda: detect_status.config(text="⏳ Awaiting user action", fg="#F39C12"))
+                            
+                            # Initialize for manual mode
+                            is_first_run = False  # Manual mode doesn't use the highlighter recording
+                            menu_action = {'value': None}
+                            
+                            # === AUTO SINGLEFILE: Trigger automatically if checkbox is checked ===
+                            if auto_singlefile_var.get():
+                                self._root.after(0, lambda: log_activity("🤖 Auto-triggering SingleFile..."))
+                                time.sleep(1)  # Small delay for page to stabilize
+                                # Trigger SingleFile button
+                                self._root.after(0, run_singlefile_and_record)
+                                # Wait for SingleFile to complete (longer timeout for auto)
+                                auto_wait_start = time.time()
+                                while time.time() - auto_wait_start < 30:  # 30 second timeout
+                                    if not self._websites_auto_capture_running:
+                                        break
+                                    # Check if HTML file was saved
+                                    html_files = list(websites_dir.glob(f"gp_{site_id}_*.html"))
+                                    if html_files:
+                                        self._root.after(0, lambda: log_activity("✅ Auto SingleFile complete"))
+                                        break
+                                    time.sleep(0.5)
+                                
+                                # === AUTO TAKE IMAGE: Trigger if checkbox is checked ===
+                                if auto_take_image_var.get():
+                                    self._root.after(0, lambda: log_activity("🤖 Auto-triggering Take Image..."))
+                                    time.sleep(0.5)
+                                    self._root.after(0, take_image_capture)
+                                    # Wait for image capture
+                                    img_wait_start = time.time()
+                                    while time.time() - img_wait_start < 15:  # 15 second timeout
+                                        if not self._websites_auto_capture_running:
+                                            break
+                                        png_files = list(websites_dir.glob(f"gp_{site_id}_*.png"))
+                                        if png_files:
+                                            self._root.after(0, lambda: log_activity("✅ Auto Take Image complete"))
+                                            break
+                                        time.sleep(0.5)
+                                
+                                # === AUTO NEXT: Move to next site automatically ===
+                                if auto_next_var.get():
+                                    self._root.after(0, lambda: log_activity("🤖 Auto-advancing to next site..."))
+                                    time.sleep(1)  # Brief pause before next
+                                    user_action['value'] = 'next'
+                            
+                            # Wait for Next button (if not auto-triggered)
+                            if user_action['value'] != 'next':
+                                while user_action['value'] != 'next' and self._websites_auto_capture_running:
+                                    if user_action['value'] in ['skip', 'dead_link', 'no_apts']:
+                                        break
+                                    time.sleep(0.3)
+                            
+                            # User clicked Next/Skip/No Apts - move to next site
+                            if user_action['value'] == 'skip':
+                                self._root.after(0, lambda n=site_name: log_activity(f"⏭️ Skipped: {n}"))
+                                continue
+                            elif user_action['value'] == 'dead_link':
+                                self._root.after(0, lambda n=site_name: log_activity(f"🔗❌ Dead link: {n}"))
+                                continue
+                            elif user_action['value'] == 'no_apts':
+                                self._root.after(0, lambda n=site_name: log_activity(f"🏚️ No apts: {n}"))
+                                continue
+                            
+                            # Update extraction_method in database (both google_places and google_addresses)
+                            if db_cursor and db_conn:
+                                try:
+                                    # Get google_addresses_id first
+                                    db_cursor.execute("SELECT google_addresses_id FROM google_places WHERE id = %s", (site_id,))
+                                    ga_result = db_cursor.fetchone()
+                                    google_addresses_id = ga_result[0] if ga_result else None
+                                    log_to_file(f"[Websites Capture] google_addresses_id for gp_id={site_id}: {google_addresses_id}")
+                                    
+                                    # Update google_places
+                                    db_cursor.execute("""
+                                        UPDATE google_places 
+                                        SET extraction_method = 'html'
+                                        WHERE id = %s
+                                    """, (site_id,))
+                                    gp_rows = db_cursor.rowcount
+                                    log_to_file(f"[Websites Capture] Updated google_places.extraction_method=html for gp_id={site_id}, rows={gp_rows}")
+                                    
+                                    # Update google_addresses if linked
+                                    ga_rows = 0
+                                    if google_addresses_id:
+                                        db_cursor.execute("""
+                                            UPDATE google_addresses 
+                                            SET extraction_method = 'html'
+                                            WHERE id = %s
+                                        """, (google_addresses_id,))
+                                        ga_rows = db_cursor.rowcount
+                                        log_to_file(f"[Websites Capture] Updated google_addresses.extraction_method=html for ga_id={google_addresses_id}, rows={ga_rows}")
+                                    
+                                    db_conn.commit()
+                                    self._root.after(0, lambda ga=google_addresses_id, gpr=gp_rows, gar=ga_rows: 
+                                        log_activity(f"   📝 DB: extraction_method=html (gp:{gpr}rows, ga_id:{ga} {gar}rows)"))
+                                    log_to_file(f"[Websites Capture] ✓ Updated extraction_method=html for gp_id={site_id}, ga_id={google_addresses_id}")
+                                except Exception as update_err:
+                                    log_to_file(f"[Websites Capture] Failed to update extraction_method: {update_err}")
+                                    import traceback
+                                    log_to_file(f"[Websites Capture] Traceback: {traceback.format_exc()}")
+                                    self._root.after(0, lambda e=str(update_err): log_activity(f"   ❌ DB Error: {e[:50]}"))
+                            
+                            self._root.after(0, lambda: log_activity("✅ Moving to next site..."))
+                            self._root.after(0, lambda: detect_status.config(text="✅ Done", fg="#27AE60"))
+                            continue  # Move to next website in the for loop
+                        
+                        elif selected_method == "image":
+                            # IMAGE METHOD: User will click "Run DivSnapper" button in Step 2
+                            self._root.after(0, lambda: log_activity("📸 Click 'Run DivSnapper' button, then press NEXT when done..."))
+                            self._root.after(0, lambda: status_lbl.config(text="📸 Image Capture"))
+                            self._root.after(0, lambda: detect_status.config(text="⏳ Awaiting user action", fg="#F39C12"))
+                            
+                            # Initialize for image mode
+                            is_first_run = False
+                            menu_action = {'value': None}
+                            
+                            # === AUTO TAKE IMAGE: Trigger automatically if checkbox is checked ===
+                            if auto_take_image_var.get():
+                                self._root.after(0, lambda: log_activity("🤖 Auto-triggering DivSnapper..."))
+                                time.sleep(1)  # Small delay for page to stabilize
+                                # Trigger DivSnapper button
+                                self._root.after(0, take_image_capture)
+                                # Wait for DivSnapper to complete
+                                auto_wait_start = time.time()
+                                while time.time() - auto_wait_start < 20:  # 20 second timeout
+                                    if not self._websites_auto_capture_running:
+                                        break
+                                    # Check if PNG file was saved
+                                    png_files = list(websites_dir.glob(f"gp_{site_id}_*.png"))
+                                    if png_files:
+                                        self._root.after(0, lambda: log_activity("✅ Auto DivSnapper complete"))
+                                        break
+                                    time.sleep(0.5)
+                                
+                                # === AUTO NEXT: Move to next site automatically ===
+                                if auto_next_var.get():
+                                    self._root.after(0, lambda: log_activity("🤖 Auto-advancing to next site..."))
+                                    time.sleep(1)  # Brief pause before next
+                                    user_action['value'] = 'next'
+                            
+                            # Wait for Next button (if not auto-triggered)
+                            if user_action['value'] != 'next':
+                                while user_action['value'] != 'next' and self._websites_auto_capture_running:
+                                    if user_action['value'] in ['skip', 'dead_link', 'no_apts']:
+                                        break
+                                    time.sleep(0.3)
+                            
+                            # User clicked Next/Skip/No Apts - move to next site
+                            if user_action['value'] == 'skip':
+                                self._root.after(0, lambda n=site_name: log_activity(f"⏭️ Skipped: {n}"))
+                                continue
+                            elif user_action['value'] == 'dead_link':
+                                self._root.after(0, lambda n=site_name: log_activity(f"🔗❌ Dead link: {n}"))
+                                continue
+                            elif user_action['value'] == 'no_apts':
+                                self._root.after(0, lambda n=site_name: log_activity(f"🏚️ No apts: {n}"))
+                                continue
+                            
+                            # Update extraction_method in database (both google_places and google_addresses)
+                            if db_cursor and db_conn:
+                                try:
+                                    # Get google_addresses_id first
+                                    db_cursor.execute("SELECT google_addresses_id FROM google_places WHERE id = %s", (site_id,))
+                                    ga_result = db_cursor.fetchone()
+                                    google_addresses_id = ga_result[0] if ga_result else None
+                                    log_to_file(f"[Websites Capture] google_addresses_id for gp_id={site_id}: {google_addresses_id}")
+                                    
+                                    # Update google_places
+                                    db_cursor.execute("""
+                                        UPDATE google_places 
+                                        SET extraction_method = 'image'
+                                        WHERE id = %s
+                                    """, (site_id,))
+                                    gp_rows = db_cursor.rowcount
+                                    log_to_file(f"[Websites Capture] Updated google_places.extraction_method=image for gp_id={site_id}, rows={gp_rows}")
+                                    
+                                    # Update google_addresses if linked
+                                    ga_rows = 0
+                                    if google_addresses_id:
+                                        db_cursor.execute("""
+                                            UPDATE google_addresses 
+                                            SET extraction_method = 'image'
+                                            WHERE id = %s
+                                        """, (google_addresses_id,))
+                                        ga_rows = db_cursor.rowcount
+                                        log_to_file(f"[Websites Capture] Updated google_addresses.extraction_method=image for ga_id={google_addresses_id}, rows={ga_rows}")
+                                    
+                                    db_conn.commit()
+                                    self._root.after(0, lambda ga=google_addresses_id, gpr=gp_rows, gar=ga_rows: 
+                                        log_activity(f"   📝 DB: extraction_method=image (gp:{gpr}rows, ga_id:{ga} {gar}rows)"))
+                                    log_to_file(f"[Websites Capture] ✓ Updated extraction_method=image for gp_id={site_id}, ga_id={google_addresses_id}")
+                                except Exception as update_err:
+                                    log_to_file(f"[Websites Capture] Failed to update extraction_method: {update_err}")
+                                    import traceback
+                                    log_to_file(f"[Websites Capture] Traceback: {traceback.format_exc()}")
+                                    self._root.after(0, lambda e=str(update_err): log_activity(f"   ❌ DB Error: {e[:50]}"))
+                            
+                            self._root.after(0, lambda: log_activity("✅ Moving to next site..."))
+                            self._root.after(0, lambda: detect_status.config(text="✅ Done", fg="#27AE60"))
+                            continue  # Move to next website in the for loop
+                            
+                        elif selected_method == "headless":
+                            self._root.after(0, lambda: log_activity("🤖 Attempting headless extraction..."))
+                            self._root.after(0, lambda: status_lbl.config(text="🤖 Trying headless"))
+                            
+                            headless_success = False
+                            if webdriver:
+                                try:
+                                    chrome_opts = ChromeOptions()
+                                    chrome_opts.add_argument("--headless")
+                                    chrome_opts.add_argument("--disable-gpu")
+                                    chrome_opts.add_argument("--no-sandbox")
+                                    driver = webdriver.Chrome(options=chrome_opts)
+                                    driver.get(site_url)
+                                    time.sleep(3)
+                                    
+                                    # Try to find listing container
+                                    page_html = driver.page_source
+                                    driver.quit()
+                                    
+                                    # Save HTML without checkmark in filename
+                                    save_path = websites_dir / f"gp_id_{site_id}.html"
+                                    with open(save_path, 'w', encoding='utf-8') as f:
+                                        f.write(page_html)
+                                    
+                                    # Store path for Open HTML button
+                                    open_html_file.current_html_path = str(save_path)
+                                    
+                                    # Show HTML preview
+                                    preview_lines = page_html[:2000]  # First 2000 chars
+                                    self._root.after(0, lambda html=preview_lines: html_preview_text.delete('1.0', 'end'))
+                                    self._root.after(0, lambda html=preview_lines: html_preview_text.insert('1.0', html))
+                                    
+                                    self._root.after(0, lambda: log_activity("✅ Headless extraction succeeded!"))
+                                    self._root.after(0, lambda: detect_status.config(text="✅ HTML captured", fg="#27AE60"))
+                                    
+                                    headless_success = True
+
+                                    
+                                    # Show detected coordinates (placeholder for now)
+                                    self._root.after(0, lambda: coords_detected_lbl.config(text="Coords: Awaiting click...", fg="#F39C12"))
+                                    
+                                    # Wait for Next button or user action
+                                    self._root.after(0, lambda: log_activity("⏸️ Waiting for NEXT button..."))
+                                    user_action['value'] = None
+                                    
+                                    # Wait loop
+                                    while user_action['value'] != 'next' and self._websites_auto_capture_running:
+                                        # Check for skip or dead link too
+                                        if user_action['value'] in ['skip', 'dead_link']:
+                                            break
+                                        time.sleep(0.3)
+                                    
+                                    # Don't open next URL here - let the loop handle it
+                                except Exception as headless_err:
+                                    log_to_file(f"[Websites Capture] Headless failed: {headless_err}")
+                                    self._root.after(0, lambda: log_activity(f"⚠️ Headless failed: {str(headless_err)[:40]}"))
+                            
+                            if headless_success:
+                                # Mark as headless in DB and continue
+                                if db_cursor and db_conn:
+                                    try:
+                                        db_cursor.execute("""
+                                            UPDATE google_addresses 
+                                            SET extraction_method = 'headless'
+                                            WHERE id = %s
+                                        """, (site_id,))
+                                        db_conn.commit()
+                                    except:
+                                        pass
+                                continue
+                            
+                            # Headless failed, show dialog with action buttons
+                            self._root.after(0, lambda: log_activity("🎯 Headless failed - showing action dialog..."))
+                            self._root.after(0, lambda: status_lbl.config(text="🎯 Choose action"))
+                            
+                            is_first_run = True  # This is a first run since dialog is being shown
+                            menu_action = {'value': None}  # 'highlighter', 'skip', 'dead_link'
+                            
+                            # Create dialog window for action selection
+                            action_dialog = tk.Toplevel(activity_win)
+                            action_dialog.title(f"First Run - {site_name[:30]}")
+                            action_dialog.geometry("400x200")
+                            action_dialog.configure(bg="#2C3E50")
+                            action_dialog.attributes('-topmost', True)
+                            
+                            # Center dialog on screen
+                            action_dialog.update_idletasks()
+                            screen_w = action_dialog.winfo_screenwidth()
+                            screen_h = action_dialog.winfo_screenheight()
+                            dialog_w = 400
+                            dialog_h = 200
+                            x = (screen_w - dialog_w) // 2
+                            y = (screen_h - dialog_h) // 2
+                            action_dialog.geometry(f"{dialog_w}x{dialog_h}+{x}+{y}")
+                            
+                            # Prevent closing
+                            action_dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+                            
+                            # Title
+                            tk.Label(action_dialog, text="⚠️ First Run Detection",
+                                    font=("Segoe UI", 12, "bold"), bg="#2C3E50", fg="#F39C12").pack(pady=(15, 5))
+                            
+                            tk.Label(action_dialog, text="Handle any popups/alerts on the website first,\nthen choose an action:",
+                                    font=("Segoe UI", 9), bg="#2C3E50", fg="#BDC3C7").pack(pady=(5, 15))
+                            
+                            # Buttons frame
+                            btn_frame = tk.Frame(action_dialog, bg="#2C3E50")
+                            btn_frame.pack(pady=10)
+                            
+                            def select_highlighter():
+                                menu_action['value'] = 'highlighter'
+                                action_dialog.destroy()
+                            
+                            def select_skip():
+                                menu_action['value'] = 'skip'
+                                action_dialog.destroy()
+                            
+                            def select_dead_link():
+                                menu_action['value'] = 'dead_link'
+                                action_dialog.destroy()
+                            
+                            def select_no_properties():
+                                menu_action['value'] = 'no_properties'
+                                action_dialog.destroy()
+                            
+                            # Show Highlighter button
+                            tk.Button(btn_frame, text="✨ Show Highlighter", bg="#27AE60", fg="white",
+                                     font=("Segoe UI", 10, "bold"), padx=15, pady=8, relief="flat",
+                                     command=select_highlighter, cursor="hand2").pack(side="left", padx=5)
+                            
+                            # Dead Link button
+                            tk.Button(btn_frame, text="🔗❌ Dead Link", bg="#E74C3C", fg="white",
+                                     font=("Segoe UI", 10, "bold"), padx=15, pady=8, relief="flat",
+                                     command=select_dead_link, cursor="hand2").pack(side="left", padx=5)
+                            
+                            # No Properties button
+                            tk.Button(btn_frame, text="🏚️ No Properties", bg="#E67E22", fg="white",
+                                     font=("Segoe UI", 10, "bold"), padx=15, pady=8, relief="flat",
+                                     command=select_no_properties, cursor="hand2").pack(side="left", padx=5)
+                            
+                            # Skip button
+                            tk.Button(btn_frame, text="⏭️ Skip", bg="#95A5A6", fg="white",
+                                     font=("Segoe UI", 10, "bold"), padx=15, pady=8, relief="flat",
+                                     command=select_skip, cursor="hand2").pack(side="left", padx=5)
+                            
+                            # Wait for dialog response
+                            self._root.after(0, lambda: detect_status.config(
+                                text="⚠️ Choose action in dialog (handle popups first)", fg="#F39C12"))
+                            
+                            # Wait for user to choose action
+                            while menu_action['value'] is None:
+                                time.sleep(0.3)
+                                if not self._websites_auto_capture_running:
+                                    try:
+                                        action_dialog.destroy()
+                                    except:
+                                        pass
+                                    break
+                        else:
+                            # SUBSEQUENT RUN: Use recorded selection (headless mode)
+                            is_first_run = False  # This is a subsequent run
+                            self._root.after(0, lambda: log_activity("⚡ Using recorded selection (headless)..."))
+                            self._root.after(0, lambda: status_lbl.config(text="⚡ Headless mode"))
+                            menu_action = {'value': 'recorded'}
+                        
+                        # Handle menu action
+                        if menu_action['value'] == 'dead_link':
+                            # Handle dead link
+                            mark_as_dead = True
+                            skip_this_site = False
+                            # Skip to dead link handling
+                            pass
+                        elif menu_action['value'] == 'no_properties':
+                            # Handle no properties - treat like dead link but different label
+                            mark_as_dead = True
+                            skip_this_site = False
+                            self._root.after(0, lambda: log_activity("🏚️ Marking as no properties..."))
+                            pass
+                        elif menu_action['value'] == 'skip':
+                            skip_this_site = True
+                            mark_as_dead = False
+                            # Skip to skip handling
+                            pass
+                        elif menu_action['value'] == 'highlighter':
+                            # FIRST RUN: Inject highlighter and record click
+                            self._root.after(0, lambda: log_activity("💉 Injecting highlighter for recording..."))
+                            self._root.after(0, lambda: status_lbl.config(text="💉 Injecting highlighter"))
+                            
+                            try:
+                                # Click on page content to make sure browser is focused
+                                screen_w = pyautogui.size()[0]
+                                screen_h = pyautogui.size()[1]
+                                content_x = int(screen_w * 0.6)  # Click in middle of right 80%
+                                content_y = int(screen_h * 0.4)  # Click in page content area
+                                pyautogui.click(content_x, content_y)
+                                time.sleep(0.5)
+                                
+                                # Open DevTools with F12
+                                pyautogui.press('f12')
+                                time.sleep(1.5)  # Wait for DevTools to open
+                                
+                                # Click on Console tab to ensure it's active (approximate position)
+                                # Console tab is typically at top of DevTools panel
+                                devtools_y = int(screen_h * 0.7)  # DevTools usually at bottom
+                                console_tab_x = int(screen_w * 0.3)  # Console tab position
+                                pyautogui.click(console_tab_x, devtools_y)
+                                time.sleep(0.5)
+                                
+                                # Click in the console input area (bottom of DevTools)
+                                console_input_y = screen_h - 50  # Near bottom of screen
+                                console_input_x = int(screen_w * 0.5)
+                                pyautogui.click(console_input_x, console_input_y)
+                                time.sleep(0.5)
+                                
+                                # Type the highlighter script
+                                highlighter_script = "(function(){document.querySelectorAll('.th-highlight').forEach(e=>e.remove());var s=document.querySelectorAll('table,div,section,article,[class*=\"listing\"],[class*=\"unit\"],[class*=\"apartment\"]');s.forEach(function(el){var r=el.getBoundingClientRect();if(r.width>50&&r.height>30){el.style.cursor='pointer';el.addEventListener('mouseenter',function(e){e.stopPropagation();this.style.outline='3px solid #3498DB';this.style.boxShadow='0 0 10px rgba(52,152,219,0.5)';});el.addEventListener('mouseleave',function(e){e.stopPropagation();this.style.outline='';this.style.boxShadow='';});el.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();this.style.outline='3px solid #27AE60';this.style.background='rgba(39,174,96,0.1)';return false;},true);}});console.log('✅ Highlighter enabled');})()"
+                                
+                                # Type and execute script
+                                pyautogui.write(highlighter_script, interval=0.005)  # Type script
+                                time.sleep(0.5)
+                                pyautogui.press('enter')  # Execute
+                                time.sleep(1)
+                                
+                                # Close DevTools
+                                pyautogui.press('f12')
+                                time.sleep(0.5)
+                                
+                                self._root.after(0, lambda: log_activity("✅ Highlighter injected - hover and click elements"))
+                                self._root.after(0, lambda: detect_status.config(
+                                    text="🎯 Hover to highlight, click to select element", fg="#27AE60"))
+                            except Exception as inject_err:
+                                log_to_file(f"[Websites Capture] Script injection error: {inject_err}")
+                                self._root.after(0, lambda: log_activity(f"⚠️ Auto-inject failed: {str(inject_err)[:50]}"))
+                                self._root.after(0, lambda: detect_status.config(
+                                    text="⚠️ Auto-inject failed - use Copy Script button", fg="#E74C3C"))
+                        
+                        # Poll for saved HTML file or recorded click
+                        capture_timeout = 120  # 2 minutes to save
+                        start_wait = time.time()
+                        html_captured = False
+                        
+                        # If first run with highlighter, wait for user click and record it
+                        if is_first_run and menu_action.get('value') == 'highlighter':
+                            self._root.after(0, lambda: log_activity("👆 Click element to record selection..."))
+                            
+                            # Create recording popup on left 20%
+                            recording_popup = tk.Toplevel(activity_win)
+                            recording_popup.title("Recording Click")
+                            recording_popup.configure(bg="#1C2833")
+                            recording_popup.attributes('-topmost', True)
+                            recording_popup.overrideredirect(True)
+                            
+                            # Position on left 20% of screen
+                            screen_w = pyautogui.size()[0]
+                            screen_h = pyautogui.size()[1]
+                            popup_w = int(screen_w * 0.18)
+                            popup_h = 200
+                            popup_x = 10
+                            popup_y = int(screen_h * 0.3)
+                            recording_popup.geometry(f"{popup_w}x{popup_h}+{popup_x}+{popup_y}")
+                            
+                            tk.Label(recording_popup, text="🎯 Recording Click",
+                                    font=("Segoe UI", 10, "bold"), bg="#1C2833", fg="#F39C12").pack(pady=(10, 5))
+                            
+                            coords_label = tk.Label(recording_popup, text="Waiting for click...",
+                                                   font=("Segoe UI", 9), bg="#1C2833", fg="#BDC3C7")
+                            coords_label.pack(pady=10)
+                            
+                            mode_label = tk.Label(recording_popup, text="📊 Mode: Browser",
+                                                 font=("Segoe UI", 8), bg="#1C2833", fg="#3498DB")
+                            mode_label.pack(pady=5)
+                            
+                            profile_label = tk.Label(recording_popup, text="📋 Profile: Old Win",
+                                                    font=("Segoe UI", 8), bg="#1C2833", fg="#9B59B6")
+                            profile_label.pack(pady=5)
+                            
+                            # Monitor mouse clicks to record position
+                            click_recorded = False
+                            recorded_click = {'x': None, 'y': None}
+                            
+                            def on_click(x, y, button, pressed):
+                                if pressed:
+                                    # Check if click is in browser area (right 80%)
+                                    if x > screen_w * 0.2:  # In browser area
+                                        recorded_click['x'] = x
+                                        recorded_click['y'] = y
+                                        log_to_file(f"[Websites Capture] Recorded click: ({x}, {y})")
+                                        self._root.after(0, lambda: coords_label.config(
+                                            text=f"✅ Recorded:\nX: {x}\nY: {y}", fg="#27AE60"))
+                                        return False  # Stop listener
+                            
+                            # Start mouse listener
+                            listener = mouse.Listener(on_click=on_click)
+                            listener.start()
+                            
+                            # Wait for click or timeout
+                            click_wait = 60  # 60 seconds to click
+                            click_start = time.time()
+                            while time.time() - click_start < click_wait:
+                                if recorded_click['x'] is not None:
+                                    click_recorded = True
+                                    break
+                                if user_action['value'] in ['dead_link', 'skip']:
+                                    break
+                                time.sleep(0.3)
+                            
+                            listener.stop()
+                            
+                            if click_recorded:
+                                # Save recorded click coordinates
+                                recorded_selections[site_id] = {
+                                    'click_x': recorded_click['x'],
+                                    'click_y': recorded_click['y']
+                                }
+                                self._root.after(0, lambda x=recorded_click['x'], y=recorded_click['y']: 
+                                                log_activity(f"✅ Recorded click at ({x}, {y})"))
+                                
+                                # Close recording popup
+                                try:
+                                    recording_popup.destroy()
+                                except:
+                                    pass
+                                
+                                # Wait for HTML file to be saved
+                                time.sleep(2)
+                            else:
+                                # Close recording popup if no click
+                                try:
+                                    recording_popup.destroy()
+                                except:
+                                    pass
+                        
+                        while time.time() - start_wait < capture_timeout:
+                            # Check pause
+                            while self._websites_auto_capture_paused:
+                                time.sleep(0.5)
+                            
+                            if not self._websites_auto_capture_running:
+                                break
+                            
+                            # Check for user actions (Dead Link / Skip / No Apts)
+                            if user_action['value'] == 'dead_link':
+                                mark_as_dead = True
+                                break
+                            
+                            if user_action['value'] == 'no_apts':
+                                mark_no_apts = True
+                                break
+                            
+                            if user_action['value'] == 'skip':
+                                skip_this_site = True
+                                break
+                            
+                            # Check if HTML file exists
+                            existing = list(websites_dir.glob(f"gp_id-{site_id}.html"))
+                            if existing:
+                                html_captured = True
+                                break
+                            
+                            time.sleep(0.5)
+                        
+                        if not self._websites_auto_capture_running:
+                            break
+                        
+                        # Handle Dead Link action
+                        if mark_as_dead:
+                            self._root.after(0, lambda n=site_name: log_activity(f"🔗❌ Dead link: {n}"))
+                            self._root.after(0, lambda: detect_status.config(text="🔗❌ Marked as dead link", fg="#E74C3C"))
+                            # Update DB to mark as dead
+                            if db_cursor and db_conn:
+                                try:
+                                    db_cursor.execute("""
+                                        UPDATE google_addresses 
+                                        SET website_status = 'dead'
+                                        WHERE id = %s
+                                    """, (site_id,))
+                                    db_conn.commit()
+                                    self._root.after(0, lambda: log_activity("   📝 DB updated: website_status = dead"))
+                                except Exception as db_err:
+                                    self._root.after(0, lambda e=str(db_err): log_activity(f"   ⚠️ DB update failed: {e}"))
+                            else:
+                                self._root.after(0, lambda: log_activity("   ⚠️ No DB connection - not saved"))
+                            time.sleep(0.5)
+                            continue
+                        
+                        # Handle No Apts action
+                        if mark_no_apts:
+                            self._root.after(0, lambda n=site_name: log_activity(f"🏚️ No apartments: {n}"))
+                            self._root.after(0, lambda: detect_status.config(text="🏚️ No apartments available", fg="#E67E22"))
+                            # Update DB to mark as no apartments
+                            if db_cursor and db_conn:
+                                try:
+                                    db_cursor.execute("""
+                                        UPDATE google_addresses 
+                                        SET website_status = 'no_apts'
+                                        WHERE id = %s
+                                    """, (site_id,))
+                                    db_conn.commit()
+                                    self._root.after(0, lambda: log_activity("   📝 DB updated: website_status = no_apts"))
+                                except Exception as db_err:
+                                    self._root.after(0, lambda e=str(db_err): log_activity(f"   ⚠️ DB update failed: {e}"))
+                            else:
+                                self._root.after(0, lambda: log_activity("   ⚠️ No DB connection - not saved"))
+                            time.sleep(0.5)
+                            continue
+                        
+                        # Handle Skip action
+                        if skip_this_site:
+                            self._root.after(0, lambda n=site_name: log_activity(f"⏭️ Skipped: {n}"))
+                            self._root.after(0, lambda: detect_status.config(text="⏭️ Skipped", fg="#95A5A6"))
+                            time.sleep(0.3)
+                            continue
+                        
+                        if html_captured:
+                            # HTML file was saved by user
+                            save_path = websites_dir / f"gp_id-{site_id}.html"
+                            
+                            # Try to extract listing data from HTML
+                            try:
+                                from bs4 import BeautifulSoup
+                                with open(save_path, 'r', encoding='utf-8') as f:
+                                    html_content = f.read()
+                                soup = BeautifulSoup(html_content, 'html.parser')
+                                text = soup.get_text(separator=' ', strip=True)
+                                
+                                # Simple extraction: look for keywords
+                                import re
+                                bed_match = re.search(r'(\d+)\s*(?:bed|br|bedroom)', text, re.I)
+                                bath_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:bath|ba|bathroom)', text, re.I)
+                                sqft_match = re.search(r'(\d{3,})\s*(?:sq\s*ft|sqft|square\s*feet)', text, re.I)
+                                price_match = re.search(r'\$([\d,]+)', text)
+                                
+                                extracted = []
+                                if bed_match:
+                                    extracted.append(f"🛏️ {bed_match.group(1)} bed")
+                                if bath_match:
+                                    extracted.append(f"🛁 {bath_match.group(1)} bath")
+                                if sqft_match:
+                                    extracted.append(f"📐 {sqft_match.group(1)} sqft")
+                                if price_match:
+                                    extracted.append(f"💰 ${price_match.group(1)}")
+                                
+                                if extracted:
+                                    extract_text = " | ".join(extracted)
+                                    self._root.after(0, lambda et=extract_text: fields_text.config(text=et))
+                                    log_to_file(f"[Websites Capture] Extracted: {extract_text}")
+                            except Exception as extract_err:
+                                log_to_file(f"[Websites Capture] Extraction failed: {extract_err}")
+                            
+                            capture_count += 1
+                            self._root.after(0, lambda c=capture_count: captured_lbl.config(text=f"📷{c}"))
+                            self._root.after(0, lambda: log_activity(f"✅ Detected: gp_id-{site_id}.html"))
+                            self._root.after(0, lambda: detect_status.config(text="✅ HTML file detected!", fg="#27AE60"))
+                            
+                            # Update database with extraction method (both google_places and google_addresses)
+                            if db_cursor and db_conn:
+                                try:
+                                    extraction_method = 'headless' if site_id in recorded_selections else 'browser'
+                                    log_to_file(f"[Websites Capture] Setting extraction_method={extraction_method} for gp_id={site_id}")
+                                    
+                                    # Get google_addresses_id first
+                                    db_cursor.execute("SELECT google_addresses_id FROM google_places WHERE id = %s", (site_id,))
+                                    ga_result = db_cursor.fetchone()
+                                    google_addresses_id = ga_result[0] if ga_result else None
+                                    log_to_file(f"[Websites Capture] google_addresses_id for gp_id={site_id}: {google_addresses_id}")
+                                    
+                                    # Update google_places
+                                    db_cursor.execute("""
+                                        UPDATE google_places 
+                                        SET extraction_method = %s
+                                        WHERE id = %s
+                                    """, (extraction_method, site_id))
+                                    gp_rows = db_cursor.rowcount
+                                    log_to_file(f"[Websites Capture] Updated google_places.extraction_method={extraction_method} for gp_id={site_id}, rows={gp_rows}")
+                                    
+                                    # Update google_addresses if linked
+                                    ga_rows = 0
+                                    if google_addresses_id:
+                                        db_cursor.execute("""
+                                            UPDATE google_addresses 
+                                            SET extraction_method = %s
+                                            WHERE id = %s
+                                        """, (extraction_method, google_addresses_id))
+                                        ga_rows = db_cursor.rowcount
+                                        log_to_file(f"[Websites Capture] Updated google_addresses.extraction_method={extraction_method} for ga_id={google_addresses_id}, rows={ga_rows}")
+                                    
+                                    db_conn.commit()
+                                    self._root.after(0, lambda m=extraction_method, ga=google_addresses_id, gpr=gp_rows, gar=ga_rows: 
+                                        log_activity(f"   📝 DB: extraction_method={m} (gp:{gpr}rows, ga_id:{ga} {gar}rows)"))
+                                    log_to_file(f"[Websites Capture] ✓ Updated extraction_method={extraction_method} for gp_id={site_id}, ga_id={google_addresses_id}")
+                                except Exception as update_err:
+                                    log_to_file(f"[Websites Capture] Failed to update extraction_method: {update_err}")
+                                    import traceback
+                                    log_to_file(f"[Websites Capture] Traceback: {traceback.format_exc()}")
+                                    self._root.after(0, lambda e=str(update_err): log_activity(f"   ❌ DB Error: {e[:50]}"))
+                        else:
+                            self._root.after(0, lambda n=site_name: log_activity(f"⏭️ Timeout - skipping {n}"))
+                            self._root.after(0, lambda: detect_status.config(text="⏭️ Timeout - skipped", fg="#E74C3C"))
+                        
+                        remaining = total - idx - 1
+                        self._root.after(0, lambda r=remaining: pending_lbl.config(text=f"⏳{r}"))
+                        
+                        # Calculate timing
+                        elapsed = time.time() - capture_start_time
+                        if capture_count > 0:
+                            avg_time = elapsed / capture_count
+                            elapsed_str = f"{int(elapsed//60)}:{int(elapsed%60):02d}"
+                            self._root.after(0, lambda c=capture_count, a=avg_time, e=elapsed_str: 
+                                log_activity(f"⏱️ {c} caps | Avg: {a:.1f}s | Total: {e}"))
+                        
+                        time.sleep(1)  # Brief pause before next
+                    
+                    # Done
+                    self._root.after(0, lambda: log_activity("🎉 Website capture complete!"))
+                    self._root.after(0, lambda: status_lbl.config(text="✅ Complete"))
+                    
+                except Exception as capture_error:
+                    error_msg = str(capture_error)
+                    log_to_file(f"[Websites Capture] CRITICAL ERROR: {error_msg}")
+                    import traceback
+                    log_to_file(f"[Websites Capture] Traceback:\n{traceback.format_exc()}")
+                    traceback.print_exc()
+                    self._root.after(0, lambda err=error_msg: log_activity(f"❌ Error: {err}"))
+                    self._root.after(0, lambda err=error_msg: status_lbl.config(text=f"❌ Error: {err[:30]}"))
+                finally:
+                    log_to_file("[Websites Capture] Entering finally block")
+                    
+                    # Close database connection
+                    if db_conn:
+                        try:
+                            db_conn.close()
+                            log_to_file("[Websites Capture] DB connection closed")
+                        except Exception as e:
+                            log_to_file(f"[Websites Capture] DB close error: {e}")
+                    
+                    self._websites_auto_capture_running = False
+                    self._root.after(0, lambda: self._websites_auto_capture_btn.config(text="🌐 Auto Capture", bg="#9B59B6"))
+                    
+                    # Close window after delay
+                    def close_window():
+                        try:
+                            activity_win.destroy()
+                        except:
+                            pass
+                    self._root.after(2000, close_window)
+                    
+                    # Restore main window
+                    try:
+                        root.deiconify()
+                        root.lift()
+                    except:
+                        pass
+            
+            log_to_file("[Websites Auto Capture] All UI components created successfully")
+            log_to_file("[Websites Auto Capture] Starting background thread...")
+            # Start in background thread
+            import threading
+            threading.Thread(target=_run_websites_auto_capture, daemon=True).start()
+            log_to_file("[Websites Auto Capture] Background thread started, window should be visible")
+        
+        self._start_websites_auto_capture = _start_websites_auto_capture
         
         # Define _refresh_queue_table function
         def _refresh_queue_table(silent: bool = False):
@@ -8051,12 +12229,12 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         where_clause = "WHERE kcp.Address IS NOT NULL AND kcp.Address != '' AND mm.metro_name = %s"
                         params = [metro_filter]
                     
-                    # First, get statistics for the status label
+                    # First, get statistics for the status label (exclude addresses with parcel_error)
                     stats_query = """
                         SELECT 
                             COUNT(*) as total_addresses,
                             SUM(CASE WHEN king_county_parcels_id IS NOT NULL THEN 1 ELSE 0 END) as with_parcel,
-                            SUM(CASE WHEN king_county_parcels_id IS NULL THEN 1 ELSE 0 END) as without_parcel
+                            SUM(CASE WHEN king_county_parcels_id IS NULL AND (parcel_error IS NULL OR parcel_error = '') THEN 1 ELSE 0 END) as without_parcel
                         FROM google_addresses ga
                         INNER JOIN major_metros mm ON mm.id = ga.metro_id
                         WHERE mm.metro_name = %s
@@ -8074,6 +12252,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         self._root.after(0, lambda: self._queue_status_label.config(text=stats_text))
                     
                     # Query google_addresses WITHOUT king_county_parcels_id (addresses that need processing)
+                    # Exclude addresses with parcel_error
                     # Parse address from json_dump column - supports both structures:
                     # {"result": {"formatted_address": "..."}} and {"results": [{"formatted_address": "..."}]}
                     query = f"""
@@ -8091,6 +12270,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         INNER JOIN major_metros mm ON mm.id = ga.metro_id
                         LEFT JOIN apartment_listings al ON al.google_addresses_id = ga.id
                         WHERE ga.king_county_parcels_id IS NULL
+                        AND (ga.parcel_error IS NULL OR ga.parcel_error = '')
                         AND ga.json_dump IS NOT NULL 
                         AND ga.json_dump != ''
                         AND ga.json_dump != '{{}}'
@@ -8228,7 +12408,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             params['metro'] = selected_metro
                         
                         log_to_file(f"[Networks] BG: Calling API: {api_url} with params: {params}")
-                        response = requests.get(api_url, params=params, timeout=15)
+                        response = requests.get(_no_cache_url(api_url), params=params, headers=_no_cache_headers(), timeout=15)
                         
                         bg_rows = []
                         status_counts = {'all': 0, 'queued': 0, 'running': 0, 'done': 0, 'error': 0}
@@ -8509,6 +12689,10 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 gp.Name, 
                                 gp.Availability_Website,
                                 gp.last_checked,
+                                gp.click_coords_x,
+                                gp.click_coords_y,
+                                gp.element_tag,
+                                gp.extraction_method,
                                 mm.metro_name,
                                 COUNT(al.id) as listing_count
                             FROM google_places gp
@@ -8516,7 +12700,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             LEFT JOIN apartment_listings al ON al.google_places_id = gp.id
                             WHERE gp.Website IS NOT NULL AND gp.Website != '' 
                             AND mm.metro_name = %s
-                            GROUP BY gp.id, gp.Website, gp.Name, gp.Availability_Website, gp.last_checked, mm.metro_name
+                            GROUP BY gp.id, gp.Website, gp.Name, gp.Availability_Website, gp.last_checked, gp.click_coords_x, gp.click_coords_y, gp.element_tag, gp.extraction_method, mm.metro_name
                             ORDER BY 
                                 CASE 
                                     WHEN gp.Availability_Website LIKE '%%http:%%' OR gp.Availability_Website LIKE '%%https:%%' THEN 0 
@@ -8537,6 +12721,10 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 'metro_name': gp.get('metro_name') or 'Seattle',
                                 'availability_website': gp.get('Availability_Website') or '',
                                 'last_checked': gp.get('last_checked'),
+                                'click_coords_x': gp.get('click_coords_x'),
+                                'click_coords_y': gp.get('click_coords_y'),
+                                'element_tag': gp.get('element_tag') or '',
+                                'extraction_method': gp.get('extraction_method') or '',
                                 'listing_count': gp.get('listing_count', 0),
                                 'run_interval_minutes': 0,
                                 'next_run': None,
@@ -8566,12 +12754,6 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                     row_id = row.get('id', '')
                                     avail_site = str(row.get('availability_website', '')).strip()
                                     
-                                    # Status indicator based on availability_website
-                                    if avail_site and 'http' in avail_site.lower():
-                                        id_with_play = f"✅ {row_id}"
-                                    else:
-                                        id_with_play = f"❌ {row_id}"
-                                    
                                     tag = "even" if idx % 2 == 0 else "odd"
                                     row_number = idx + 1
                                     avail_display = avail_site[:40] + '...' if len(avail_site) > 40 else avail_site
@@ -8596,24 +12778,31 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                         except Exception:
                                             last_checked_display = str(last_checked)[:16]
                                     
-                                    # Websites: 16 columns - #, ID, Link, Metro, Name, Avail Website, Last Checked, Status, Δ$, +, -, Total, ▶️, ✏️, hidden1, hidden2
+                                    # Websites: 12 columns - #, ID, Link, Metro, Name, Avail Website, Last Checked, Coords, TAG, Method, ▶️, ✏️
+                                    coords_x = row.get('click_coords_x')
+                                    coords_y = row.get('click_coords_y')
+                                    coords_display = f"({coords_x},{coords_y})" if coords_x and coords_y else "-"
+                                    tag_display = (row.get('element_tag') or '')[:15]
+                                    method = row.get('extraction_method', '') or ''
+                                    method_display = method if method else "-"
+                                    
                                     values_tuple = (
                                         row_number,                          # #
-                                        id_with_play,                        # ID
+                                        row_id,                              # ID
                                         row.get('link', '')[:50],            # Link (truncated)
                                         row.get('metro_name', ''),           # Metro
                                         row.get('name', '')[:30],            # Name (truncated)
                                         avail_display,                       # Avail Website
                                         last_checked_display,                # Last Checked
-                                        'queued',                            # Status
-                                        '-',                                 # Δ$
-                                        '-',                                 # +
-                                        '-',                                 # -
-                                        row.get('listing_count', 0),         # Total
+                                        coords_display,                      # Coords
+                                        tag_display,                         # TAG
+                                        method_display,                      # Method
                                         "▶️",                                # Play button
                                         "✏️",                                # Edit button
                                         row.get('availability_website', ''), # hidden1 (full URL)
-                                        ""                                   # hidden2
+                                        row.get('link', ''),                 # hidden2 (full link)
+                                        row.get('id', ''),                   # hidden3 (ID for play button)
+                                        method                               # hidden4 (extraction_method from DB)
                                     )
                                     websites_queue_tree.insert("", "end", values=values_tuple, tags=(tag,))
                                 
@@ -8670,7 +12859,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                                 api_url += f"?search={requests.utils.quote(account_search)}"
                             
                             log_to_file(f"[Accounts] Calling API: {api_url}")
-                            r = requests.get(api_url, timeout=10)
+                            r = requests.get(api_url, headers=_no_cache_headers(), timeout=10)
                             if r.status_code == 200:
                                 data = r.json()
                                 if isinstance(data, dict) and data.get('ok'):
@@ -8710,7 +12899,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         try:
                             api_url = php_url("step5/get_code_cities.php?limit=500")
                             log_to_file(f"[Code] Calling API: {api_url}")
-                            r = requests.get(api_url, timeout=10)
+                            r = requests.get(api_url, headers=_no_cache_headers(), timeout=10)
                             if r.status_code == 200:
                                 data = r.json()
                                 if isinstance(data, dict) and data.get('ok'):
@@ -8748,7 +12937,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         try:
                             api_url = php_url("step5/get_911_cities.php?limit=500")
                             log_to_file(f"[911] Calling API: {api_url}")
-                            r = requests.get(api_url, timeout=10)
+                            r = requests.get(api_url, headers=_no_cache_headers(), timeout=10)
                             if r.status_code == 200:
                                 data = r.json()
                                 if isinstance(data, dict) and data.get('ok'):
@@ -8869,32 +13058,26 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             except:
                                 address = ''
                         
-                        # Check if parcels_{id}.png or parcels_{id}_processed.png or skipped marker exists
-                        from pathlib import Path
-                        parcels_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels")
-                        image_file = parcels_dir / f"parcels_{row_id}.png"
-                        processed_file = parcels_dir / f"parcels_{row_id}_processed.png"
-                        skipped_file = parcels_dir / f"parcels_{row_id}_skipped.txt"
+                        # Get parcel_error from row data
+                        parcel_error = row.get('parcel_error', '') or ''
+                        # Truncate error for display
+                        error_display = parcel_error[:30] + '...' if len(parcel_error) > 30 else parcel_error
+                        if not error_display:
+                            error_display = "-"
                         
-                        if processed_file.exists():
-                            image_status = "✅ Done"
-                        elif image_file.exists():
-                            image_status = "📷 Has Image"  # Changed to indicate image exists (won't be captured again)
-                        elif skipped_file.exists():
-                            image_status = "⏭️ Skipped"
-                        else:
-                            image_status = "❌ No"
+                        # Truncate metro for tight column
+                        metro_name = row.get('metro_name', '') or ''
+                        metro_display = metro_name[:8] if len(metro_name) > 8 else metro_name
                         
-                        # Add row number to ID
+                        # Row number for counting
                         row_number = idx + 1
-                        id_display = f"{row_number}. {row_id}"
                         
                         item_id = self._queue_tree.insert("", "end", values=(
-                            id_display,                        # ID column with row number
-                            address,                           # Address column
-                            row.get('network_id', ''),         # Network column
-                            row.get('metro_name', ''),         # Metro column
-                            image_status,                      # Image column (Yes/No/Done)
+                            str(row_number),                   # # column (row counter)
+                            row_id,                            # GAID column (google_addresses.id)
+                            address,                           # Address column (left-aligned)
+                            metro_display,                     # Metro column (tight)
+                            error_display,                     # Error column (parcel_error)
                             "✏️"                               # Edit button
                         ), tags=(tag,))
                         
@@ -9002,23 +13185,20 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                         from pathlib import Path
                         parcels_dir = Path(r"C:\Users\dokul\Desktop\robot\th_poller\Captures\parcels")
                         if parcels_dir.exists():
-                            # Count unprocessed images (parcels_*.png but not *_processed.png)
-                            all_images = list(parcels_dir.glob("parcels_*.png"))
-                            unprocessed = [img for img in all_images if not img.stem.endswith('_processed')]
-                            processed = [img for img in all_images if img.stem.endswith('_processed')]
+                            # Count images ready for processing (parcels_*.png, excluding DEBUG files)
+                            all_images = [img for img in parcels_dir.glob("parcels_*.png") if not img.stem.startswith('DEBUG')]
                             
-                            unprocessed_count = len(unprocessed)
-                            processed_count = len(processed)
+                            image_count = len(all_images)
                             
                             # Update status label with image counts
-                            status_text = f"📊 {len(rows)} addresses without parcel | 📷 {unprocessed_count} images ready"
-                            if unprocessed_count >= 20:
+                            status_text = f"📊 {len(rows)} addresses without parcel | 📷 {image_count} images ready"
+                            if image_count >= 20:
                                 status_text += f" | ✅ Ready to run OpenAI batch!"
                             
                             if hasattr(self, '_queue_status_label'):
                                 self._root.after(0, lambda t=status_text: self._queue_status_label.config(text=t))
                             
-                            log_to_file(f"[Parcel] Image count: {unprocessed_count} unprocessed, {processed_count} processed")
+                            log_to_file(f"[Parcel] Image count: {image_count} ready for processing")
                     except Exception as img_err:
                         log_to_file(f"[Parcel] Failed to count images: {img_err}")
                 
@@ -9071,7 +13251,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     if not silent:
                         log_to_file(f"[Queue] Fetching all records for counts from API: {api_url}")
                     
-                    response = requests.get(api_url, timeout=10)
+                    response = requests.get(_no_cache_url(api_url), headers=_no_cache_headers(), timeout=10)
                     response.raise_for_status()
                     data = response.json()
                     
@@ -9216,27 +13396,28 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
         root.after(60000, _auto_refresh_tick)  # First check after 1 minute
         
         # ========== PENDING JOBS WINDOW ==========
-        # Create small always-on-top window showing next 5 queued jobs
+        # Create window showing next 5 queued jobs (can go behind other apps)
         pending_window = tk.Toplevel(root)
         self._pending_window = pending_window  # Store reference
         self._pending_window_visible = True  # Track visibility state
         pending_window.title("Pending Jobs")
-        pending_window.attributes('-topmost', True)  # Always on top
+        # Don't set -topmost to allow window to go behind other apps
         pending_window.resizable(False, False)
         
         # Get profile manager for window sizing
         profile_mgr = get_profile_manager()
         
-        # Calculate position using profile settings
+        # Calculate position using profile settings - 5% from bottom
         screen_width = pending_window.winfo_screenwidth()
         screen_height = pending_window.winfo_screenheight()
         
-        # Check for saved geometry first, otherwise use profile defaults
+        # Check for saved geometry first, otherwise use defaults (95% height = 5% from bottom)
         saved_geom = profile_mgr.get_window_geometry("pending_window")
         if saved_geom:
             x_position, y_position, window_width, window_height = saved_geom
         else:
-            window_width, window_height = profile_mgr.get_pending_window_size(screen_width, screen_height)
+            window_width = int(screen_width * 0.20)  # 20% width
+            window_height = int(screen_height * 0.95)  # 95% height (5% from bottom)
             x_position = 0  # Left edge
             y_position = 0  # Top edge
         
@@ -9379,7 +13560,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     try:
                         log_conn = get_external_db()
                         log_cursor = log_conn.cursor()
-                        log_cursor.execute("INSERT INTO pending_jobs_log (checked_at) VALUES (%s)", (current_time,))
+                        log_cursor.execute("INSERT INTO pending_jobs_log (checked_at, label) VALUES (%s, %s)", (current_time, 'auto_check'))
                         log_conn.commit()
                         log_cursor.close()
                         log_conn.close()
@@ -9410,7 +13591,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                     }
                     
                     log_to_file(f"[Pending] Fetching jobs from external API: {api_url}")
-                    response = requests.get(api_url, params=params, timeout=10)
+                    response = requests.get(_no_cache_url(api_url), params=params, headers=_no_cache_headers(), timeout=10)
                     
                     if response.status_code == 200:
                         api_data = response.json()
@@ -9827,7 +14008,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                             
                             log_to_file(f"[Accounts] Calling API: {api_url}")
                             import requests
-                            response = requests.get(api_url, timeout=10)
+                            response = requests.get(api_url, headers=_no_cache_headers(), timeout=10)
                             log_to_file(f"[Accounts] API response status: {response.status_code}")
                             
                             if response.status_code == 200:
@@ -12137,7 +16318,7 @@ Note: You need an active NordVPN subscription to use the VPN feature."""
                 try:
                     log_to_file(f"[Queue] ✗ Job not in cache, fetching from API...")
                     api_url = f"https://api.trustyhousing.com/manual_upload/queue_website_api.php?table={table}&status=all&limit=1000"
-                    response = requests.get(api_url, timeout=10)
+                    response = requests.get(_no_cache_url(api_url), headers=_no_cache_headers(), timeout=10)
                     response.raise_for_status()
                     data = response.json()
                     

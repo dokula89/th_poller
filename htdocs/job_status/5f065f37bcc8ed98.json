@@ -1,0 +1,13 @@
+{
+    "status": "error",
+    "percent": 100,
+    "message": "Exception: Unknown database 'offta'",
+    "log": [
+        "[01:50:41] [PHP] Validating inputs",
+        "[01:50:41] [PHP] Parsing locally",
+        "[01:50:41] [PHP] Exception: Unknown database 'offta'"
+    ],
+    "result": null,
+    "started_at": 1765068641,
+    "updated": 1765068641
+}

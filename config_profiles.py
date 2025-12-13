@@ -20,33 +20,57 @@ PROFILES = {
         "description": "MacOS machines",
         "default_settings": {
             "pending_window_width_pct": 0.20,
-            "pending_window_height_pct": 1.0,
+            "pending_window_height_pct": 0.95,
             "parcel_window_width_pct": 0.20,
-            "parcel_window_height_pct": 1.0,
+            "parcel_window_height_pct": 0.95,
             "queue_poller_width": 420,
             "queue_poller_height": 700,
+            # Mac-specific settings
+            "use_macos_menu_bar": True,
+            "pyautogui_pause": 0.1,  # Slower automation for Mac
+            "browser_path": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "tesseract_path": "/usr/local/bin/tesseract",  # Homebrew install path
+            "nordvpn_cli_path": "/usr/local/bin/nordvpn",
+            "font_family": "SF Pro Text",  # Mac system font
+            "font_size_adjustment": 0,  # Mac fonts render differently
         }
     },
     "Old Win": {
         "description": "Old Windows laptop (WINDOWSA)",
         "default_settings": {
             "pending_window_width_pct": 0.20,
-            "pending_window_height_pct": 1.0,
+            "pending_window_height_pct": 0.95,
             "parcel_window_width_pct": 0.20,
-            "parcel_window_height_pct": 1.0,
+            "parcel_window_height_pct": 0.95,
             "queue_poller_width": 420,
             "queue_poller_height": 700,
+            # Windows-specific settings
+            "use_macos_menu_bar": False,
+            "pyautogui_pause": 0.05,
+            "browser_path": None,  # Use system default
+            "tesseract_path": r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            "nordvpn_cli_path": "nordvpn",
+            "font_family": "Segoe UI",
+            "font_size_adjustment": 0,
         }
     },
     "New Win": {
         "description": "Newer Windows machines",
         "default_settings": {
             "pending_window_width_pct": 0.20,
-            "pending_window_height_pct": 1.0,
+            "pending_window_height_pct": 0.95,
             "parcel_window_width_pct": 0.20,
-            "parcel_window_height_pct": 1.0,
+            "parcel_window_height_pct": 0.95,
             "queue_poller_width": 420,
             "queue_poller_height": 700,
+            # Windows-specific settings
+            "use_macos_menu_bar": False,
+            "pyautogui_pause": 0.05,
+            "browser_path": None,  # Use system default
+            "tesseract_path": r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            "nordvpn_cli_path": "nordvpn",
+            "font_family": "Segoe UI",
+            "font_size_adjustment": 0,
         }
     }
 }

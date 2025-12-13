@@ -6503,7 +6503,7 @@ class OldCompactHUD:
                         host="localhost",
                         user="root",
                         password="",
-                        database="offta"
+                        database="offta_local"
                     )
                     local_cursor = local_conn.cursor()
                     
@@ -6795,7 +6795,7 @@ class OldCompactHUD:
                             port=3306,
                             user=dest_user,
                             password=dest_pass if dest_pass else "",
-                            database="offta",
+                            database="offta_local",
                             connection_timeout=60
                         )
                         import_cursor = import_conn.cursor()
@@ -6931,7 +6931,7 @@ class OldCompactHUD:
                             port=3306,
                             user=dest_user,
                             password=dest_pass if dest_pass else "",
-                            database="offta",
+                            database="offta_local",
                             connection_timeout=30
                         )
                         verify_cursor = verify_conn.cursor()
@@ -7152,7 +7152,7 @@ class OldCompactHUD:
                             port=3306,
                             user=dest_user,
                             password=dest_pass if dest_pass else "",
-                            database="offta",
+                            database="offta_local",
                             connection_timeout=60
                         )
                         import_cursor = import_conn.cursor()
@@ -7320,7 +7320,7 @@ class OldCompactHUD:
                             host="localhost",
                             user="root",
                             password="",
-                            database="offta"
+                            database="offta_local"
                         )
                         local_cursor = local_conn.cursor()
                         

@@ -1,29 +1,15 @@
 <?php
-header('Content-Type: application/json; charset=utf-8');
-header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-header('Pragma: no-cache');
+// Use shared DB connection
+require_once __DIR__ . '/db_connection.php';
+_no_cache_headers();
 
-function out_json($arr, $code = 200) {
-    http_response_code($code);
-    echo json_encode($arr, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    exit;
+$mysqli = get_shared_db();
+if (!$mysqli) {
+    out_json(['ok' => false, 'error' => 'DB connection failed'], 500);
 }
-
-// Basic DB config
-$DB_HOST = '127.0.0.1';
-$DB_USER = 'local_uzr';
-$DB_PASS = 'fuck';
-$DB_NAME = 'offta';
-$DB_PORT = 3306;
 
 // Get metro_name from query parameter
 $metro_name = isset($_GET['metro']) ? trim($_GET['metro']) : '';
-
-$mysqli = @new mysqli($DB_HOST, $DB_USER, $DB_PASS, $DB_NAME, $DB_PORT);
-if ($mysqli->connect_errno) {
-    out_json(['ok' => false, 'error' => 'DB connection failed: ' . $mysqli->connect_error], 500);
-}
-$mysqli->set_charset('utf8mb4');
 
 try {
     if (empty($metro_name) || $metro_name === 'All') {
@@ -48,13 +34,16 @@ try {
     
     $metro_id = (int)$row['id'];
     
-    // Count google_addresses where king_county_parcels_id IS NULL or empty AND metro_id matches
-        // Count google_addresses where king_county_parcels_id IS NULL (only) AND metro_id matches
+    // Count google_addresses where king_county_parcels_id IS NULL (only) AND metro_id matches
+        // Also exclude addresses with parcel_error
+        // Only count King County addresses (json_dump must contain "King County")
         $stmt2 = $mysqli->prepare("
             SELECT COUNT(*) as empty_count 
             FROM google_addresses 
             WHERE metro_id = ? 
             AND king_county_parcels_id IS NULL
+            AND (parcel_error IS NULL OR parcel_error = '')
+            AND json_dump LIKE '%King County%'
         ");
     
     if (!$stmt2) {

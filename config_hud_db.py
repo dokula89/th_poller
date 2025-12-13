@@ -6,11 +6,12 @@ Split from config_hud.py
 """
 
 # Database configuration - used by parcel automation
+# Uses EXTERNAL MySQL database (same as main app)
 DB_CONFIG = {
-    'host': 'localhost',
+    'host': '172.104.206.182',
     'port': 3306,
-    'user': 'root',
-    'password': '',
+    'user': 'seattlelisted_usr',
+    'password': 'T@5z6^pl}',
     'database': 'offta'
 }
 
@@ -19,14 +20,6 @@ def update_db_status(network_id, status, error_msg=None):
     """Update network status in database with optional error message"""
     try:
         import mysql.connector
-        
-        DB_CONFIG = {
-            'host': 'localhost',
-            'port': 3306,
-            'user': 'root',
-            'password': '',
-            'database': 'offta'
-        }
         
         conn = mysql.connector.connect(**DB_CONFIG, connect_timeout=10)
         cursor = conn.cursor()

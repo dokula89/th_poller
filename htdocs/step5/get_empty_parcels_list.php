@@ -1,35 +1,26 @@
 <?php
-header('Content-Type: application/json; charset=utf-8');
-header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-header('Pragma: no-cache');
+// Use shared DB connection
+require_once __DIR__ . '/db_connection.php';
+_no_cache_headers();
 
-function out_json($arr, $code = 200) {
-    http_response_code($code);
-    echo json_encode($arr, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    exit;
+$mysqli = get_shared_db();
+if (!$mysqli) {
+    out_json(['ok' => false, 'error' => 'DB connection failed'], 500);
 }
-
-// Basic DB config (keep consistent with other step5 endpoints)
-$DB_HOST = '127.0.0.1';
-$DB_USER = 'local_uzr';
-$DB_PASS = 'fuck';
-$DB_NAME = 'offta';
-$DB_PORT = 3306;
 
 $metro = isset($_GET['metro']) ? trim($_GET['metro']) : '';
 $limit = isset($_GET['limit']) ? max(1, min(1000, (int)$_GET['limit'])) : 20; // default 20 per page
 $page  = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
 $offset = ($page - 1) * $limit;
 
-$mysqli = @new mysqli($DB_HOST, $DB_USER, $DB_PASS, $DB_NAME, $DB_PORT);
-if ($mysqli->connect_errno) {
-    out_json(['ok' => false, 'error' => 'DB connection failed: ' . $mysqli->connect_error], 500);
-}
-$mysqli->set_charset('utf8mb4');
-
 try {
-    // Build WHERE clause
-    $where = ["ga.king_county_parcels_id IS NULL"]; // NULL-only per spec
+    // Build WHERE clause - exclude addresses with parcel_error
+    // Only include addresses that have "King County" in json_dump (for King County Parcel Viewer)
+    $where = [
+        "ga.king_county_parcels_id IS NULL", 
+        "(ga.parcel_error IS NULL OR ga.parcel_error = '')",
+        "ga.json_dump LIKE '%King County%'"
+    ];
     $params = [];
     $types = '';
 
@@ -53,6 +44,7 @@ try {
                 ga.longitude,
                 ga.json_dump,
                 ga.metro_id,
+                ga.parcel_error,
                 m.metro_name
             FROM google_addresses ga
             JOIN major_metros m ON ga.metro_id = m.id
@@ -98,7 +90,8 @@ try {
             'lat' => isset($r['latitude']) ? (float)$r['latitude'] : null,
             'lng' => isset($r['longitude']) ? (float)$r['longitude'] : null,
             'metro_id' => isset($r['metro_id']) ? (int)$r['metro_id'] : null,
-            'metro_name' => $r['metro_name']
+            'metro_name' => $r['metro_name'],
+            'parcel_error' => $r['parcel_error'] ?? ''
         ];
     }
 

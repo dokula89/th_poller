@@ -64,9 +64,9 @@ function dbg($msg) {
 //////////////////////
 // DB CONFIG
 //////////////////////
-$DB_HOST = '127.0.0.1';
-$DB_USER = 'root';
-$DB_PASS = '';
+$DB_HOST = '172.104.206.182';
+$DB_USER = 'seattlelisted_usr';
+$DB_PASS = 'T@5z6^pl}';
 $DB_NAME = 'offta';
 $DB_PORT = 3306;
 
